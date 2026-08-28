@@ -1,0 +1,18 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "larger_model": "Qwen/Qwen3-1.7B",
+  "interest_topk": 3,
+  "interest_strategy": "frequency",
+  "time_decay": 0.1,
+  "interest_parameterization": "independent_head",
+  "conditioning": "interest_bottleneck",
+  "num_plans": 8,
+  "sid_beams": 8,
+  "eval_beams": 10,
+  "eval_candidate_budget": 80,
+  "max_history_len": 50,
+  "max_seq_len": 2048,
+  "interest_loss_weight": 1.0,
+  "sid_loss_weight": 1.0,
+  "seed": 42
+}

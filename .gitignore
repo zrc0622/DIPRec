@@ -11,6 +11,8 @@ output_dir/*
 analysis_results/*
 temp/*
 logs/*
+/outputs/
+/.planning/
 *.whl
 *.pyc
 
