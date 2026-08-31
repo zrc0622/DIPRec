@@ -1,41 +1,47 @@
-# DIPRec 远程复现指南
+# 七组实验快速复现
 
-本扩展不会改动 SIDReasoner 原有的训练文件。以下命令均在仓库根目录执行。训练环境建议使用 Linux、Python 3.10 和 CUDA GPU，并确保 Qwen3、VeRL、vLLM 与当前 CUDA/PyTorch 版本兼容。
+所有命令都在仓库根目录执行。默认使用 SIDReasoner 官方划分、50 条历史、Qwen3-0.6B 和 seed 42；七组实验共用同一份 `.index.json`，不重新训练 SID 索引。
 
-## 环境安装
+## 1. 安装环境
+
+作用：创建独立的 Python 3.11 环境，先按远端 CUDA 版本安装匹配的 PyTorch 2.6.0，再安装其余依赖。不要把该 requirements 安装进 Open WebUI 等共享服务环境；其他应用造成的 `pip check` 冲突不代表独立 DIPRec 环境不兼容。
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+conda create -n diprec python=3.11 -y
+conda activate diprec
+# 先使用 PyTorch 官方命令安装与 CUDA 匹配的 torch==2.6.0 wheel。
 python -m pip install --upgrade pip
 python -m pip install -r requirements-diprec.txt
+python -c "import torch, trl; print('torch', torch.__version__, 'CUDA', torch.version.cuda, 'TRL', trl.__version__, 'GPU', torch.cuda.is_available())"
 ```
 
-如需运行多卡 SIDReasoner GRPO，请参考原始 README 使用兼容 VeRL 的 CUDA 镜像，并设置 `NUM_GPUS`。数据需自行放到本地；Hugging Face 会优先读取本地缓存，缺少模型时则在远程主机下载。
+`requirements-diprec.txt` 中的 `torch` 保持注释。四个 RL 实验统一使用固定版本 `trl==0.24.0` 与 `transformers==4.57.1`，不需要 VeRL、vLLM、FlashAttention、PEFT 或 W&B。DIPRec 在 TRL 上增加两阶段分层扩展，不再使用独立的手写优化循环。
 
-仓库内置的 VeRL 代码主要适配 PyTorch 2.4–2.6 和 vLLM 0.8。若镜像未预装 FlashAttention/FlashInfer，请安装与 CUDA 环境匹配的版本后再运行 RL。
+这七组实验不安装 VeRL、vLLM、FlashAttention。若以后要运行仓库保留的原 SIDReasoner/VeRL 脚本，请再按 VeRL 官方文档单独构建对应环境。
 
-## 数据准备与长历史数据集选择
+这里的 MiniOneRec 是共享实验协议下的可比复现，不是逐行重跑上游脚本。启用的 SFT 任务族（历史 SID→SID、SID→title、title→SID、历史 SID→title）、RL 任务族（历史 SID→SID、title→SID、description→SID，以及最多 10,000 条 title-history→SID）、`G=16`、ranking reward 的结构和 catalog 约束均对齐官方实现。在 SID 奖励比较中，DIPRec 为兼容 tokenizer 插入的空格会忽略内部空白，而上游 MiniOneRec 将内部空白按字面比较。七种方法统一使用本仓库的 Qwen chat prompt、重建的长历史数据、AdamW 训练日程、checkpoint 协议和评测器。两个 RL baseline 各自冻结对应的父 checkpoint 作为 reference：Direct-RL 对应 Direct-SFT，MiniOneRec-RL 对应 MiniOneRec-SFT；这点有意不同于上游 MiniOneRec 的 `sync_ref_model=True` recipe。
 
-将未经历史截断的 Amazon 事件级交互文件放到：
+RL 训练沿用 MiniOneRec 的 constrained beam sampling（`do_sample=True`）。七组评测的 SID 排序阶段统一使用确定性 constrained beam（`do_sample=False`）和 80 个原始 SID 候选预算；候选按 SID 去重后截取**最多** Top-10，不用重复项补满。DIPRec 将 80 个候选分配给各 plan（默认 `8 × 10`），再按 `log p(plan) + log p(SID | plan)` 联合排序；兴趣 plan 仍按固定 seed 采样。
+
+默认显存配置偏保守：SFT 使用 micro-batch 2/累积 16，Direct/MiniOneRec-RL 使用 micro-batch 1/累积 16，DIPRec-RL 使用 micro-batch 1/累积 8。两个 RL trainer 都会自动令全局 generation batch 等于 `per_device_batch_size × world_size × gradient_accumulation_steps`（单卡分别为 16 和 8）。它们不是硬件最优值；先执行 `--dry_run`，再按远端 GPU 调整对应训练脚本参数。两个 DIPRec-RL 方法都使用冻结的 DIPRec-SFT reference（`beta=1e-3`），缓存 old-policy log-prob，并将每批 rollout 复用两次（`num_iterations=2`），因此第二次更新开始 PPO clipping 会实际生效。`diprec_traj_rl` 将完整轨迹 advantage 同时用于两阶段；`diprec_plan_rl` 保留 plan 跨 G、SID 在 B 内的两级 advantage。
+
+## 2. 放置官方数据
+
+作用：提供官方划分、固定 SID 和 MiniOneRec 的标题/描述对齐数据。
 
 ```text
-data/Amazon/raw/Office_Products.jsonl[.gz]
-data/Amazon/raw/Video_Games.jsonl[.gz]
-data/Amazon/raw/Industrial_and_Scientific.jsonl[.gz]
+data/Amazon/train/{dataset}_5_2016-10-2018-11.csv
+data/Amazon/valid/{dataset}_5_2016-10-2018-11.csv
+data/Amazon/test/{dataset}_5_2016-10-2018-11.csv
+data/Amazon/index/{dataset}.index.json
+data/Amazon/index/{dataset}.item.json
 ```
 
-每条记录至少需要包含：
+`{dataset}` 为 `Video_Games`、`Office_Products` 或 `Industrial_and_Scientific`。
 
-- 用户字段：`user_id` 或 `reviewerID`
-- 商品字段：`item_id` 或 `asin`
-- 时间字段：`timestamp` 或 `unixReviewTime`
+## 3. 选择并构建长历史数据
 
-将已有 SID 映射放到 `data/Amazon/index/{dataset}.index.json`。带有 `history_item_*` 字段的旧 CSV 已经预先构造或截断历史，不能作为原始事件文件，因此程序会拒绝读取。
-
-SIDReasoner 的论文和原脚本有时将 `Video_Games` 简写成 `Games`。新脚本同时接受这两个名称，并统一规范为 `Video_Games`；这里的 `Games` 并不是 `Toys_and_Games`。
-
-先统计三个数据集的真实历史长度并选择长历史最丰富的一至两个数据集：
+作用：选出长历史最多的两个数据集，保持官方 train/valid/test target 不变，并将其前缀历史扩展到最多 50 条。
 
 ```bash
 python scripts/select_long_history_datasets.py \
@@ -44,110 +50,123 @@ python scripts/select_long_history_datasets.py \
   --stats_output outputs/history_length_stats.csv \
   --selection_output configs/selected_long_history_datasets.txt
 
-DATASET="$(sed -n '1p' configs/selected_long_history_datasets.txt)"
-
-python scripts/build_long_history_data.py \
-  --dataset "$DATASET" \
-  --max_history_len 50
+while read -r DATASET; do
+  python scripts/build_long_history_data.py --dataset "$DATASET"
+done < configs/selected_long_history_datasets.txt
 ```
 
-数据构建流程按用户和时间排序，采用 leave-last-two-out：倒数第二个交互作为验证目标，最后一个作为测试目标，每个目标只能看到其之前的历史，再保留最近 50 个行为。输出位于 `data/processed/$DATASET/history_50/`，包括：
+输出：`data/processed/$DATASET/history_50/`。
 
-- `train.jsonl`、`valid.jsonl`、`test.jsonl`
-- 带原始数据和 SID 映射校验和的 `manifest.json`
-- 截断前后历史长度统计 `history_length_stats.csv`
+## 4. 检查七组命令
 
-`configs/` 中提供 10、20、50 三种历史长度配置。修改长度后需要重新构建对应数据。
+作用：校验数据、任务数量、checkpoint 依赖和评测路径，不启动 GPU 训练。
 
-重复运行时，如果已有 `manifest.json`，预处理会复用并校验现有数据。共享 checkpoint 只有在模型权重、`config.json` 和 `training_config.json` 均存在时才会复用；若目录不完整，程序会提前报错。需要重建或重训时，请先手动删除或移动对应的旧目录。
+```bash
+bash scripts/run_all_comparisons.sh --dry_run
+```
 
-## 单数据集对比实验（seed 42）
+## 5. 运行七组实验
 
-各方法使用同一份数据、同一个 catalog trie、相同的 80 条原始 SID 候选搜索预算，并统一输出 Top-10。DIPRec 会把总预算分配到不同兴趣 plan，再对所有轨迹统一重排，避免比基线多获得 `num_plans` 倍的候选探索量。
+作用：依次运行以下依赖图。
 
-结果默认写入：
+| 方法 | 父 checkpoint | 训练目标 / 上游对齐边界 |
+|---|---|---|
+| `direct_sft` | Qwen | 历史 SID→下一 SID 的监督基线 |
+| `direct_rl` | `direct_sft` | TRL GRPO，采用 MiniOneRec 风格 ranking reward 与 constrained beam sampling |
+| `minionerec_sft` | Qwen | 共享协议下启用的四类 MiniOneRec SFT 任务 |
+| `minionerec_rl` | `minionerec_sft` | 启用的四类 MiniOneRec RL 任务、`G=16`、冻结 reference |
+| `diprec_sft` | `minionerec_sft` | 兴趣 plan SFT + plan 条件 SID SFT |
+| `diprec_traj_rl` | `diprec_sft` | 轨迹级两阶段 TRL 目标 |
+| `diprec_plan_rl` | `diprec_sft` | plan 级与 plan 内 SID 两级 advantage |
+
+```text
+Qwen
+├─ direct_sft ───────────────→ direct_rl          (TRL)
+└─ minionerec_sft ─┬────────→ minionerec_rl      (TRL)
+                    └────────→ diprec_sft
+                                  ├─ diprec_traj_rl
+                                  └─ diprec_plan_rl
+```
+
+```bash
+bash scripts/run_all_comparisons.sh
+```
+
+两个 DIPRec-RL 会分别从同一个 `diprec_sft` checkpoint 启动，不会串行继承彼此。输出位于：
 
 ```text
 outputs/$DATASET/history_50/Qwen_Qwen3-0.6B/$METHOD/seed_42/
 ```
 
-可通过 `--eval_candidate_budget` 修改公共搜索预算；对于 DIPRec，该值不能小于 `--num_plans`。
+如需普通多卡 DDP，在相同命令前加启动参数。包装脚本会对 SFT 和 TRL-RL 训练调用 `accelerate launch`，预处理与评测仍保持单进程：
 
 ```bash
-# 1. Direct-SID 基线
-bash scripts/run_experiment.sh --method direct_sid --model Qwen/Qwen3-0.6B --dataset "$DATASET" --max_history_len 50 --max_seq_len 2048 --seed 42
-
-# 2. SIDReasoner：共享数据上的自然语言 reasoning SFT + 原始 VeRL GRPO
-bash scripts/run_experiment.sh --method sidreasoner --model Qwen/Qwen3-0.6B --dataset "$DATASET" --max_history_len 50 --max_seq_len 2048 --seed 42
-
-# 3. DIPRec SFT
-bash scripts/run_experiment.sh --method diprec_sft --model Qwen/Qwen3-0.6B --dataset "$DATASET" --interest_topk 3 --max_history_len 50 --max_seq_len 2048 --seed 42
-
-# 4. DIPRec trajectory-level GRPO
-bash scripts/run_experiment.sh --method diprec_trajectory_grpo --model Qwen/Qwen3-0.6B --dataset "$DATASET" --interest_topk 3 --num_plans 8 --sid_beams 8 --max_history_len 50 --max_seq_len 2048 --seed 42
-
-# 5. DIPRec plan-level GRPO
-bash scripts/run_experiment.sh --method diprec_plan_grpo --model Qwen/Qwen3-0.6B --dataset "$DATASET" --interest_topk 3 --num_plans 8 --sid_beams 8 --max_history_len 50 --max_seq_len 2048 --seed 42
+DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 bash scripts/run_all_comparisons.sh
 ```
 
-默认参数化方式为 `independent_head`：兴趣 token 使用独立输入 embedding 和输出 head。`--interest_parameterization disjoint_rows` 则让兴趣 token 与 SID token 使用共享矩阵中的不同参数行，可作为原生 vLLM 直接加载模型时的兼容方案。
+Accelerate 配置必须使用普通 multi-GPU DDP。自定义集中式 rollout 只在 rank 0 生成候选后广播，因此每个 rank 都必须持有完整模型；trainer 初始化时会明确拒绝 DeepSpeed、FSDP 和 tensor parallelism。
 
-默认条件模式 `--conditioning interest_bottleneck` 会开启一个新的 SID 解码过程，只向它提供兴趣 plan，不再提供完整历史；`history_visible` 是允许 SID 解码器继续读取历史的消融设置。
+非 dry-run 的依赖训练或评测在加载模型权重前，会校验 canonical method、processed-data 指纹（其中包含 SID index），以及需要时的 item-metadata 校验和；DIPRec 父 checkpoint 复用与评测还会校验兴趣标签策略/top-k/time-decay、conditioning 和 parameterization，RL 评测另校验训练时的 plan/beam 形状。任何不匹配都会立即失败，不会静默复用陈旧 checkpoint。结果 JSON 将不可变的 `training_config` 与本次 `evaluation_config` 分开保存。
 
-为保证数据划分公平，统一实验中的 `sidreasoner` 分支会根据每条历史前缀确定性构造自然语言理由，不混入官方发布的 10-item narrative 语料。它保留 SIDReasoner 的 reasoning→SID SFT/VeRL-GRPO 训练形式，但并非论文 checkpoint 的逐位复现；若要复现原论文设置，可继续使用未改动的原始脚本。
+## 6. 单独运行一个实验
 
-## 批量对比与结果汇总
-
-数据集列表文件只能包含选出的一个或两个数据集。
+作用：只运行目标方法；缺少的 SFT 父 checkpoint 会自动补训并校验。
 
 ```bash
-# 先运行 seed 42
-bash scripts/run_all_comparisons.sh --model Qwen/Qwen3-0.6B --dataset_file configs/selected_long_history_datasets.txt --seeds 42 --max_history_len 50 --max_seq_len 2048 --eval_beams 10 --eval_candidate_budget 80
+bash scripts/run_experiment.sh \
+  --method minionerec_sft \
+  --dataset Video_Games
 
+bash scripts/run_experiment.sh \
+  --method diprec_plan_rl \
+  --dataset Video_Games
+```
+
+可用方法：
+
+```text
+direct_sft
+direct_rl
+minionerec_sft
+minionerec_rl
+diprec_sft
+diprec_traj_rl
+diprec_plan_rl
+```
+
+## 7. 汇总结果
+
+作用：将所有 `metrics.json` 汇总成一个 CSV。
+
+```bash
 python scripts/summarize_results.py \
   --input outputs/ \
   --output outputs/comparison.csv
-
-# 仅在 seed 42 上 DIPRec 优于基线后，再补跑三个随机种子
-bash scripts/run_all_comparisons.sh --model Qwen/Qwen3-0.6B --dataset_file configs/selected_long_history_datasets.txt --seeds 42,43,44 --max_history_len 50 --max_seq_len 2048 --eval_beams 10 --eval_candidate_budget 80
 ```
 
-`metrics.json` 和 `comparison.csv` 会记录 Recall@5/10、NDCG@5/10、SID 合法率、兴趣多样性、分层 SID 命中率、评测预算、配置和数据哈希。建议先验证 Qwen3-0.6B；只有小模型结果为正时，再切换到 `Qwen/Qwen3-1.7B`。
+## 8. 多随机种子和消融
 
-## 单独评测 checkpoint
-
-验证集和测试集使用同一个评测器。请根据实际方法和 checkpoint 修改下列路径：
+作用：补跑多个 seed，或显式改用 leave-last-two-out。
 
 ```bash
-# 验证集
-bash scripts/eval_diprec.sh --method diprec_plan_grpo --model output_dir/$DATASET/history_50/Qwen_Qwen3-0.6B/diprec_plan_grpo/seed_42/final_checkpoint --test_file data/processed/$DATASET/history_50/valid.jsonl --sid_index data/Amazon/index/$DATASET.index.json --output outputs/$DATASET/history_50/Qwen_Qwen3-0.6B/diprec_plan_grpo/seed_42/valid_metrics.json --split valid --max_history_len 50 --max_seq_len 2048 --interest_topk 3 --num_plans 8 --sid_beams 8 --eval_beams 10 --eval_candidate_budget 80 --seed 42
+bash scripts/run_all_comparisons.sh --seeds 42,43,44
 
-# 测试集
-bash scripts/eval_diprec.sh --method diprec_plan_grpo --model output_dir/$DATASET/history_50/Qwen_Qwen3-0.6B/diprec_plan_grpo/seed_42/final_checkpoint --test_file data/processed/$DATASET/history_50/test.jsonl --sid_index data/Amazon/index/$DATASET.index.json --output outputs/$DATASET/history_50/Qwen_Qwen3-0.6B/diprec_plan_grpo/seed_42/metrics.json --split test --max_history_len 50 --max_seq_len 2048 --interest_topk 3 --num_plans 8 --sid_beams 8 --eval_beams 10 --eval_candidate_budget 80 --seed 42
+bash scripts/run_all_comparisons.sh \
+  --split_strategy leave_last_two_out \
+  --seeds 42
 ```
 
-完整评测参数可通过以下命令查看：
+常用参数：`--max_history_len 10|20|50`、`--model Qwen/Qwen3-1.7B`、`--conditioning history_visible|interest_bottleneck`。
 
-```bash
-bash scripts/eval_diprec.sh --help
-```
+RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，以及对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
 
-## 本地检查与尚未验证项
+## 9. 运行检查
+
+作用：运行轻量回归测试和语法检查。
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q diprec scripts
+python -m compileall -q diprec scripts tests
 ```
 
-当前已在本地验证：纯 Python 数据与算法契约、原始数据集选择、长历史划分与构建、所有训练/评测入口的 dry-run、Python 语法和 Shell 语法。
-
-当前尚未在本机验证：
-
-- 模型和 tokenizer 的实际下载
-- CUDA kernel
-- vLLM/VeRL 分布式执行
-- GPU 显存与 batch size 调优
-- VeRL checkpoint 合并
-- 真实数据上的最终指标
-
-`independent_head` 使用仓库提供的 Hugging Face/Accelerate rollout；如果必须让标准 vLLM 引擎直接加载模型，请使用 `disjoint_rows`。
+固定 TRL 0.24.0 兼容环境下，当前发现的 79 项测试全部通过。另行执行的两个 RL trainer 完整双进程 CPU DDP 生命周期也均通过；Shell 语法、Python 编译、空白检查，以及 `Video_Games`/`Office_Products` × 七方法 dry-run 同样通过。CUDA kernel、GPU 显存上限和真实数据完整训练仍依赖远端训练机，需要在那里最终验证。

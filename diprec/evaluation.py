@@ -1,4 +1,4 @@
-"""Unified constrained evaluator for all five comparison methods."""
+"""Unified catalog-constrained evaluator for the seven comparison methods."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from .data import (
     parse_sid_levels,
     read_jsonl,
     validate_history_records,
+    validate_checkpoint_training_contract,
     validate_manifest_sid_index,
 )
 from .grpo import _generate_plans, _generate_sid_candidates, _sequence_log_probs
@@ -22,7 +23,18 @@ from .prompts import history_prompt, messages
 from .rewards import aggregate_metric_rows, interest_diversity, ranking_metrics, sid_level_hits
 from .runtime import apply_chat_template, load_model_runtime, set_seed, thinking_prompt_ids
 
-DIPREC_METHODS = {"diprec_sft", "diprec_trajectory_grpo", "diprec_plan_grpo"}
+BASELINE_METHODS = {"direct_sft", "direct_rl", "minionerec_sft", "minionerec_rl"}
+DIPREC_METHODS = {"diprec_sft", "diprec_traj_rl", "diprec_plan_rl"}
+ITEM_METADATA_METHODS = {"minionerec_sft", "minionerec_rl", *DIPREC_METHODS}
+METHOD_ALIASES = {
+    "direct_sid": "direct_sft",
+    "diprec_trajectory_grpo": "diprec_traj_rl",
+    "diprec_plan_grpo": "diprec_plan_rl",
+}
+
+
+def canonical_evaluation_method(method: str) -> str:
+    return METHOD_ALIASES.get(method, method)
 
 
 def prediction_output_path(metrics_path: str | Path, split: str) -> Path:
@@ -47,6 +59,62 @@ def per_plan_candidate_budget(total_budget: int, num_plans: int) -> list[int]:
         )
     quotient, remainder = divmod(total_budget, num_plans)
     return [quotient + int(index < remainder) for index in range(num_plans)]
+
+
+def unique_top_candidates(
+    candidates: Sequence[Sequence[str]], valid: Sequence[bool], limit: int
+) -> tuple[list[list[str]], list[bool]]:
+    """Keep the first occurrence of each ranked SID without duplicate padding."""
+
+    if len(candidates) != len(valid):
+        raise ValueError("Candidate and validity counts differ")
+    if limit < 1:
+        raise ValueError("Candidate limit must be positive")
+    selected: list[list[str]] = []
+    selected_valid: list[bool] = []
+    seen: set[tuple[str, ...]] = set()
+    for candidate, is_valid in zip(candidates, valid):
+        key = tuple(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(list(candidate))
+        selected_valid.append(bool(is_valid))
+        if len(selected) == limit:
+            break
+    return selected, selected_valid
+
+
+def validate_evaluation_checkpoint(
+    args: argparse.Namespace, manifest: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Fail fast when a seven-model result points at an incompatible checkpoint."""
+
+    if args.method == "sidreasoner":
+        return {}
+    item_meta_path = None
+    if args.method in ITEM_METADATA_METHODS:
+        if not getattr(args, "item_meta", None):
+            raise ValueError(f"{args.method} evaluation requires --item_meta")
+        item_meta_path = args.item_meta
+    expected_config = None
+    if args.method in DIPREC_METHODS:
+        expected_config = {
+            "interest_topk": args.interest_topk,
+            "interest_strategy": args.interest_strategy,
+            "time_decay": args.time_decay,
+            "conditioning": args.conditioning,
+            "interest_parameterization": args.interest_parameterization,
+        }
+        if args.method in {"diprec_traj_rl", "diprec_plan_rl"}:
+            expected_config.update(num_plans=args.num_plans, sid_beams=args.sid_beams)
+    return validate_checkpoint_training_contract(
+        args.model,
+        expected_method=args.method,
+        manifest=manifest,
+        item_meta_path=item_meta_path,
+        expected_config=expected_config,
+    )
 
 
 def _device(model: Any):
@@ -85,7 +153,12 @@ def _generate_catalog_beams(
     )
     ids = [sequence[len(prompt_ids) : len(prompt_ids) + 3].tolist() for sequence in generated]
     tokens = [tokenizer.convert_ids_to_tokens(sequence) for sequence in ids]
-    return ids, tokens, [trie.contains(sequence) for sequence in ids]
+    valid = [trie.contains(sequence) for sequence in ids]
+    if len(ids) != sid_beams or not all(valid):
+        raise RuntimeError(
+            f"Constrained evaluator returned {len(ids)} candidates, valid={valid}"
+        )
+    return ids, tokens, valid
 
 
 def _reasoning_context(
@@ -157,8 +230,9 @@ def _evaluate_record(
     plan_budgets: list[int] = []
     reasoning = None
     raw_candidate_count = 0
+    unique_candidate_count = 0
     with torch.no_grad():
-        if args.method == "direct_sid":
+        if args.method in BASELINE_METHODS:
             prompt_ids = apply_chat_template(
                 tokenizer, messages(history_prompt(record, args.max_history_len, reasoning=False)), True
             )
@@ -166,8 +240,10 @@ def _evaluate_record(
                 model, tokenizer, trie, prompt_ids, args.eval_candidate_budget, args.max_seq_len
             )
             raw_candidate_count = len(raw_candidates)
-            ranked_candidates = raw_candidates[: args.eval_beams]
-            ranked_valid = raw_valid[: args.eval_beams]
+            unique_candidate_count = len({tuple(candidate) for candidate in raw_candidates})
+            ranked_candidates, ranked_valid = unique_top_candidates(
+                raw_candidates, raw_valid, args.eval_beams
+            )
         elif args.method == "sidreasoner":
             context, reasoning = _reasoning_context(
                 model,
@@ -181,8 +257,10 @@ def _evaluate_record(
                 model, tokenizer, trie, context, args.eval_candidate_budget, args.max_seq_len
             )
             raw_candidate_count = len(raw_candidates)
-            ranked_candidates = raw_candidates[: args.eval_beams]
-            ranked_valid = raw_valid[: args.eval_beams]
+            unique_candidate_count = len({tuple(candidate) for candidate in raw_candidates})
+            ranked_candidates, ranked_valid = unique_top_candidates(
+                raw_candidates, raw_valid, args.eval_beams
+            )
         elif args.method in DIPREC_METHODS:
             if registry is None:
                 raise AssertionError("DIPRec evaluation requires an interest token registry")
@@ -227,22 +305,14 @@ def _evaluate_record(
                 f"<think><INT_BEGIN>{''.join(plans[plan_index])}<INT_END></think>{joined_sid(candidate)}"
                 for _, plan_index, _, candidate, _ in scored
             ]
-            ranked_candidates, ranked_valid, seen = [], [], set()
-            for _, _, _, candidate, is_valid in scored:
-                key = tuple(candidate)
-                if key in seen:
-                    continue
-                seen.add(key)
-                ranked_candidates.append(candidate)
-                ranked_valid.append(is_valid)
-                if len(ranked_candidates) == args.eval_beams:
-                    break
-            if len(ranked_candidates) < args.eval_beams:
-                for _, _, _, candidate, is_valid in scored:
-                    ranked_candidates.append(candidate)
-                    ranked_valid.append(is_valid)
-                    if len(ranked_candidates) == args.eval_beams:
-                        break
+            raw_ranked_candidates = [candidate for _, _, _, candidate, _ in scored]
+            raw_ranked_valid = [is_valid for _, _, _, _, is_valid in scored]
+            unique_candidate_count = len(
+                {tuple(candidate) for candidate in raw_ranked_candidates}
+            )
+            ranked_candidates, ranked_valid = unique_top_candidates(
+                raw_ranked_candidates, raw_ranked_valid, args.eval_beams
+            )
         else:
             raise ValueError(f"Unknown method: {args.method}")
 
@@ -270,6 +340,8 @@ def _evaluate_record(
         "trajectories": trajectories,
         "reasoning": reasoning,
         "raw_candidate_count": raw_candidate_count,
+        "unique_candidate_count": unique_candidate_count,
+        "returned_candidate_count": len(ranked_candidates),
         "per_plan_candidate_budget": plan_budgets,
         "metrics": metrics,
     }
@@ -278,6 +350,7 @@ def _evaluate_record(
 
 def evaluate(args: argparse.Namespace) -> None:
     set_seed(args.seed)
+    args.method = canonical_evaluation_method(args.method)
     if args.method in DIPREC_METHODS and args.num_plans < 1:
         raise ValueError("num_plans must be positive")
     if args.eval_beams < 1:
@@ -298,6 +371,9 @@ def evaluate(args: argparse.Namespace) -> None:
     validate_manifest_sid_index(manifest, args.sid_index)
     sid_map = load_sid_map(args.sid_index)
     is_diprec = args.method in DIPREC_METHODS
+    checkpoint_training_config = {}
+    if not args.dry_run:
+        checkpoint_training_config = validate_evaluation_checkpoint(args, manifest)
     if args.dry_run:
         print(
             json.dumps(
@@ -336,10 +412,22 @@ def evaluate(args: argparse.Namespace) -> None:
         if index % args.log_every == 0:
             print(f"evaluated={index}/{len(records)}")
     metrics = aggregate_metric_rows(rows)
-    checkpoint_training_config = {}
-    checkpoint_config_path = Path(args.model) / "training_config.json"
-    if checkpoint_config_path.is_file():
-        checkpoint_training_config = json.loads(checkpoint_config_path.read_text(encoding="utf-8"))
+    evaluation_config = {
+        "max_history_len": args.max_history_len,
+        "max_seq_len": args.max_seq_len,
+        "interest_topk": args.interest_topk if is_diprec else 0,
+        "interest_strategy": args.interest_strategy if is_diprec else None,
+        "time_decay": args.time_decay if is_diprec else None,
+        "num_plans": args.num_plans if is_diprec else 0,
+        "training_sid_beams": args.sid_beams if args.method in {"diprec_traj_rl", "diprec_plan_rl"} else 0,
+        "eval_beams": args.eval_beams,
+        "eval_candidate_budget": args.eval_candidate_budget,
+        "conditioning": args.conditioning if is_diprec else None,
+        "interest_parameterization": args.interest_parameterization if is_diprec else None,
+        "plan_temperature": args.plan_temperature if is_diprec else None,
+        "plan_top_p": args.plan_top_p if is_diprec else None,
+        "plan_sampling_attempts": args.plan_sampling_attempts if is_diprec else None,
+    }
     result = {
         "schema_version": "diprec.metrics.v1",
         "method": args.method,
@@ -350,19 +438,14 @@ def evaluate(args: argparse.Namespace) -> None:
         "split": args.split,
         "num_examples": len(records),
         "metrics": metrics,
-        "training_config": checkpoint_training_config | {
-            "max_history_len": args.max_history_len,
-            "max_seq_len": args.max_seq_len,
-            "interest_topk": args.interest_topk,
-            "num_plans": args.num_plans if is_diprec else 0,
-            "sid_beams": args.sid_beams,
-            "eval_beams": args.eval_beams,
-            "eval_candidate_budget": args.eval_candidate_budget,
-            "conditioning": args.conditioning if is_diprec else None,
-            "interest_parameterization": args.interest_parameterization if is_diprec else None,
-        },
+        "training_config": checkpoint_training_config,
+        "evaluation_config": evaluation_config,
         "data_manifest": {
-            "raw_sha256": manifest["raw_sha256"],
+            "source_kind": manifest["source_kind"],
+            "source_sha256": manifest.get(
+                "source_sha256",
+                {"raw": manifest.get("raw_sha256")},
+            ),
             "sid_index_sha256": manifest["sid_index_sha256"],
             "split_strategy": manifest["split_strategy"],
         },
@@ -382,18 +465,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--method",
-        choices=("direct_sid", "sidreasoner", "diprec_sft", "diprec_trajectory_grpo", "diprec_plan_grpo"),
+        choices=(
+            "direct_sft",
+            "direct_rl",
+            "minionerec_sft",
+            "minionerec_rl",
+            "diprec_sft",
+            "diprec_traj_rl",
+            "diprec_plan_rl",
+            "direct_sid",
+            "sidreasoner",
+            "diprec_trajectory_grpo",
+            "diprec_plan_grpo",
+        ),
         required=True,
     )
     parser.add_argument("--model", required=True)
     parser.add_argument("--base_model")
     parser.add_argument("--test_file", required=True)
     parser.add_argument("--sid_index", required=True)
+    parser.add_argument("--item_meta")
     parser.add_argument("--output", required=True)
     parser.add_argument("--split", choices=("valid", "test"), default="test")
     parser.add_argument("--max_history_len", type=int, default=50, choices=(10, 20, 50))
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--interest_topk", type=int, default=3)
+    parser.add_argument(
+        "--interest_strategy", choices=("frequency", "time_decay"), default="frequency"
+    )
+    parser.add_argument("--time_decay", type=float, default=0.1)
     parser.add_argument("--num_plans", type=int, default=8)
     parser.add_argument("--sid_beams", type=int, default=8)
     parser.add_argument("--eval_beams", type=int, default=10)

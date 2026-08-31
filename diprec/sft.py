@@ -8,10 +8,65 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .data import load_sid_map, read_jsonl, validate_history_records, validate_manifest_sid_index
+from .data import (
+    joined_sid,
+    load_item_metadata,
+    load_sid_map,
+    processed_data_fingerprint,
+    read_jsonl,
+    sha256_file,
+    validate_history_records,
+    validate_checkpoint_training_contract,
+    validate_manifest_sid_index,
+)
 from .interest import assert_prefix_only_label, diprec_response, interest_tokens_from_history
-from .prompts import history_prompt, messages, plan_prompt, sid_prompt
+from .prompts import (
+    history_prompt,
+    history_to_title_prompt,
+    messages,
+    plan_prompt,
+    sid_prompt,
+    sid_to_title_prompt,
+    title_to_sid_prompt,
+)
 from .runtime import apply_chat_template, load_model_runtime, save_runtime, set_seed, thinking_prompt_ids
+
+SFT_METHOD_ALIASES = {
+    "direct_sid": "direct_sft",
+    "direct_sft": "direct_sft",
+    "minionerec_sft": "minionerec_sft",
+    "diprec_sft": "diprec_sft",
+    # Retained for the original SIDReasoner-compatible entrypoint.
+    "sidreasoner_sft": "sidreasoner_sft",
+}
+
+
+def canonical_sft_method(method: str) -> str:
+    try:
+        return SFT_METHOD_ALIASES[method]
+    except KeyError as exc:
+        raise ValueError(
+            "SFT method must be direct_sft, minionerec_sft, diprec_sft, "
+            "or a supported legacy alias"
+        ) from exc
+
+
+def catalog_alignment_maps(
+    item_metadata: Mapping[str, Mapping[str, Any]],
+    sid_map: Mapping[str, Sequence[str]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Reproduce MiniOneRec's last-write-wins SID/title dictionaries."""
+
+    sid_to_title: dict[str, str] = {}
+    title_to_sid: dict[str, str] = {}
+    for item_id, sid_levels in sid_map.items():
+        if item_id not in item_metadata:
+            raise ValueError(f"SID-index item {item_id!r} is absent from item metadata")
+        sid = joined_sid(sid_levels)
+        title = str(item_metadata[item_id]["title"])
+        sid_to_title[sid] = title
+        title_to_sid[title] = sid
+    return sid_to_title, title_to_sid
 
 
 def response_for_record(
@@ -21,8 +76,9 @@ def response_for_record(
     interest_strategy: str,
     time_decay: float,
 ) -> tuple[str, list[str]]:
+    method = canonical_sft_method(method)
     target_sid = str(record["target_item_sid"])
-    if method == "direct_sid":
+    if method in {"direct_sft", "minionerec_sft"}:
         return target_sid, []
     if method == "sidreasoner_sft":
         interests = interest_tokens_from_history(
@@ -39,7 +95,7 @@ def response_for_record(
         )
         return f"<think>{reasoning}</think>{target_sid}", interests
     if method != "diprec_sft":
-        raise ValueError("SFT method must be direct_sid, sidreasoner_sft, or diprec_sft")
+        raise ValueError("Unsupported SFT method")
     label_record = dict(record, interest_strategy=interest_strategy, time_decay=time_decay)
     tokens = interest_tokens_from_history(record["history_sid_levels"], interest_topk, interest_strategy, time_decay)
     assert_prefix_only_label(label_record, tokens)
@@ -87,12 +143,15 @@ def encode_sft_records(
     interest_strategy: str,
     time_decay: float,
     conditioning: str,
+    item_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+    sid_to_title: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    method = canonical_sft_method(method)
     response, interest_tokens = response_for_record(
         record, method, interest_topk, interest_strategy, time_decay
     )
     metadata = {"sample_id": record.get("sample_id"), "interest_tokens": interest_tokens}
-    if method != "diprec_sft":
+    if method in {"direct_sft", "sidreasoner_sft"}:
         prompt = history_prompt(record, max_history_len, reasoning=method == "sidreasoner_sft")
         return [
             _encode_pair(
@@ -103,6 +162,33 @@ def encode_sft_records(
                 metadata | {"stage": method},
                 thinking=method == "sidreasoner_sft",
             )
+        ]
+    if method == "minionerec_sft":
+        if item_metadata is None:
+            raise ValueError("MiniOneRec-SFT requires item metadata")
+        target_id = str(record["target_item_id"])
+        if target_id not in item_metadata:
+            raise ValueError(f"Target item {target_id!r} is absent from item metadata")
+        target_title = (
+            str(sid_to_title[str(record["target_item_sid"])])
+            if sid_to_title is not None
+            else str(item_metadata[target_id]["title"])
+        )
+        return [
+            _encode_pair(
+                tokenizer,
+                history_prompt(record, max_history_len, reasoning=False),
+                response,
+                max_seq_len,
+                metadata | {"stage": "history_sid_to_sid"},
+            ),
+            _encode_pair(
+                tokenizer,
+                history_to_title_prompt(record, max_history_len),
+                target_title,
+                max_seq_len,
+                metadata | {"stage": "history_sid_to_title"},
+            ),
         ]
 
     plan_response = response[: response.index("</think>") + len("</think>")]
@@ -124,6 +210,38 @@ def encode_sft_records(
     return [plan_row, sid_row]
 
 
+def encode_catalog_sft_records(
+    tokenizer: Any,
+    item_metadata: Mapping[str, Mapping[str, Any]],
+    sid_map: Mapping[str, Sequence[str]],
+    max_seq_len: int,
+) -> list[dict[str, Any]]:
+    """Build MiniOneRec's bidirectional title/SID alignment tasks."""
+
+    sid_to_title, title_to_sid = catalog_alignment_maps(item_metadata, sid_map)
+    rows = [
+        _encode_pair(
+            tokenizer,
+            sid_to_title_prompt(sid),
+            title,
+            max_seq_len,
+            {"sample_id": f"catalog:{sid}:sid_to_title", "stage": "sid_to_title"},
+        )
+        for sid, title in sid_to_title.items()
+    ]
+    rows.extend(
+        _encode_pair(
+            tokenizer,
+            title_to_sid_prompt(title),
+            sid,
+            max_seq_len,
+            {"sample_id": f"catalog:{title}:title_to_sid", "stage": "title_to_sid"},
+        )
+        for title, sid in title_to_sid.items()
+    )
+    return rows
+
+
 def encode_sft_record(
     tokenizer: Any,
     record: Mapping[str, Any],
@@ -134,6 +252,8 @@ def encode_sft_record(
     interest_strategy: str,
     time_decay: float,
     conditioning: str = "interest_bottleneck",
+    item_metadata: Mapping[str, Mapping[str, Any]] | None = None,
+    sid_to_title: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Compatibility helper returning the first encoded task for a record."""
 
@@ -147,6 +267,8 @@ def encode_sft_record(
         interest_strategy,
         time_decay,
         conditioning,
+        item_metadata,
+        sid_to_title,
     )[0]
 
 
@@ -206,6 +328,7 @@ def _evaluate_loss(model: Any, loader: Any, accelerator: Any) -> float:
 
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
+    method = canonical_sft_method(args.method)
     train_path = Path(args.train_file)
     valid_path = Path(args.valid_file)
     manifest = _manifest_for(train_path)
@@ -215,17 +338,55 @@ def train(args: argparse.Namespace) -> None:
     valid_stats = validate_history_records(valid_records, args.max_history_len, manifest)
     validate_manifest_sid_index(manifest, args.sid_index)
     sid_map = load_sid_map(args.sid_index)
+    item_metadata = None
+    sid_to_title = None
+    title_to_sid = None
+    if method == "minionerec_sft":
+        if not args.item_meta:
+            raise ValueError("MiniOneRec-SFT requires --item_meta")
+        item_metadata = load_item_metadata(args.item_meta, sid_map)
+        sid_to_title, title_to_sid = catalog_alignment_maps(item_metadata, sid_map)
+    elif method == "diprec_sft":
+        if not args.item_meta:
+            raise ValueError("DIPRec-SFT requires --item_meta to validate its MiniOneRec-SFT parent")
+        if not args.dry_run:
+            validate_checkpoint_training_contract(
+                args.model,
+                expected_method="minionerec_sft",
+                manifest=manifest,
+                item_meta_path=args.item_meta,
+            )
     if args.dry_run:
-        multiplier = 2 if args.method == "diprec_sft" else 1
+        train_samples = len(train_records)
+        valid_samples = len(valid_records)
+        task_counts = {"history_sid_to_sid": len(train_records)}
+        if method == "minionerec_sft":
+            assert sid_to_title is not None and title_to_sid is not None
+            train_samples = 2 * len(train_records) + len(sid_to_title) + len(title_to_sid)
+            task_counts = {
+                "history_sid_to_sid": len(train_records),
+                "title_to_sid": len(title_to_sid),
+                "sid_to_title": len(sid_to_title),
+                "history_sid_to_title": len(train_records),
+            }
+        elif method == "diprec_sft":
+            train_samples = 2 * len(train_records)
+            valid_samples = 2 * len(valid_records)
+            task_counts = {
+                "interest_plan": len(train_records),
+                "sid_prediction": len(train_records),
+            }
         print(
             json.dumps(
                 {
-                    "method": args.method,
-                    "train_samples": len(train_records) * multiplier,
-                    "valid_samples": len(valid_records) * multiplier,
+                    "method": method,
+                    "train_samples": train_samples,
+                    "valid_samples": valid_samples,
+                    "task_counts": task_counts,
                     "train_history": train_stats,
                     "valid_history": valid_stats,
                     "catalog_items": len(sid_map),
+                    "item_metadata": len(item_metadata) if item_metadata is not None else 0,
                     "model": args.model,
                     "interest_parameterization": args.interest_parameterization,
                     "conditioning": args.conditioning,
@@ -246,7 +407,7 @@ def train(args: argparse.Namespace) -> None:
         sid_map,
         args.interest_parameterization,
         training=True,
-        include_interest=args.method == "diprec_sft",
+        include_interest=method == "diprec_sft",
     )
 
     train_rows = [
@@ -255,28 +416,37 @@ def train(args: argparse.Namespace) -> None:
         for row in encode_sft_records(
             tokenizer,
             record,
-            args.method,
+            method,
             args.max_history_len,
             args.max_seq_len,
             args.interest_topk,
             args.interest_strategy,
             args.time_decay,
             args.conditioning,
+            item_metadata,
+            sid_to_title,
         )
     ]
+    if method == "minionerec_sft":
+        assert item_metadata is not None
+        train_rows.extend(
+            encode_catalog_sft_records(tokenizer, item_metadata, sid_map, args.max_seq_len)
+        )
     valid_rows = [
         row
         for record in valid_records
         for row in encode_sft_records(
             tokenizer,
             record,
-            args.method,
+            "direct_sft" if method == "minionerec_sft" else method,
             args.max_history_len,
             args.max_seq_len,
             args.interest_topk,
             args.interest_strategy,
             args.time_decay,
             args.conditioning,
+            item_metadata,
+            sid_to_title,
         )
     ]
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
@@ -317,19 +487,31 @@ def train(args: argparse.Namespace) -> None:
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
         save_runtime(unwrapped, tokenizer, router, args.output_dir, args.interest_parameterization)
-        training_config = vars(args) | {"train_history": train_stats, "valid_history": valid_stats}
+        training_config = vars(args) | {
+            "method": method,
+            "item_meta_sha256": sha256_file(args.item_meta) if args.item_meta else None,
+            "train_history": train_stats,
+            "valid_history": valid_stats,
+            "data_manifest": processed_data_fingerprint(manifest),
+        }
         Path(args.output_dir, "training_config.json").write_text(
             json.dumps(training_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+    accelerator.wait_for_everyone()
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", choices=("direct_sid", "sidreasoner_sft", "diprec_sft"), required=True)
+    parser.add_argument(
+        "--method",
+        choices=("direct_sft", "minionerec_sft", "diprec_sft", "direct_sid", "sidreasoner_sft"),
+        required=True,
+    )
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--train_file", required=True)
     parser.add_argument("--valid_file", required=True)
     parser.add_argument("--sid_index", required=True)
+    parser.add_argument("--item_meta")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--max_history_len", type=int, default=50, choices=(10, 20, 50))
     parser.add_argument("--max_seq_len", type=int, default=2048)

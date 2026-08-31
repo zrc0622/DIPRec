@@ -9,6 +9,9 @@ MODEL="Qwen/Qwen3-0.6B"
 DATASET=""
 RAW_PATH=""
 SID_INDEX=""
+ITEM_META=""
+DATA_SOURCE="official"
+SPLIT_STRATEGY="official_temporal"
 INTEREST_TOPK=3
 NUM_PLANS=8
 SID_BEAMS=8
@@ -21,6 +24,16 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
+SFT_MICRO_BATCH_SIZE=2
+SFT_GRADIENT_ACCUMULATION_STEPS=16
+BASELINE_RL_PER_DEVICE_BATCH_SIZE=1
+BASELINE_RL_GENERATION_BATCH_SIZE=""
+BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=16
+DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
+DIPREC_RL_GENERATION_BATCH_SIZE=""
+DIPREC_RL_GRADIENT_ACCUMULATION_STEPS=8
+DIPREC_RL_NUM_ITERATIONS=2
+DIPREC_RL_BETA=0.001
 SKIP_PREPROCESS=0
 DRY_RUN=0
 
@@ -35,6 +48,9 @@ while [[ $# -gt 0 ]]; do
     --dataset) DATASET="$2"; shift 2 ;;
     --raw_path) RAW_PATH="$2"; shift 2 ;;
     --sid_index) SID_INDEX="$2"; shift 2 ;;
+    --item_meta) ITEM_META="$2"; shift 2 ;;
+    --data_source) DATA_SOURCE="$2"; shift 2 ;;
+    --split_strategy) SPLIT_STRATEGY="$2"; shift 2 ;;
     --interest_topk) INTEREST_TOPK="$2"; shift 2 ;;
     --num_plans) NUM_PLANS="$2"; shift 2 ;;
     --sid_beams) SID_BEAMS="$2"; shift 2 ;;
@@ -47,6 +63,16 @@ while [[ $# -gt 0 ]]; do
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_micro_batch_size) SFT_MICRO_BATCH_SIZE="$2"; shift 2 ;;
+    --sft_gradient_accumulation_steps) SFT_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --baseline_rl_per_device_batch_size) BASELINE_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
+    --baseline_rl_generation_batch_size) BASELINE_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
+    --baseline_rl_gradient_accumulation_steps) BASELINE_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
+    --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
+    --diprec_rl_gradient_accumulation_steps) DIPREC_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --diprec_rl_num_iterations) DIPREC_RL_NUM_ITERATIONS="$2"; shift 2 ;;
+    --diprec_rl_beta) DIPREC_RL_BETA="$2"; shift 2 ;;
     --skip_preprocess) SKIP_PREPROCESS=1; shift ;;
     --dry_run) DRY_RUN=1; shift ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
@@ -62,22 +88,58 @@ case "$DATASET" in
   Industrial) DATASET="Industrial_and_Scientific" ;;
 esac
 case "$METHOD" in
-  direct_sid|sidreasoner|diprec_sft|diprec_trajectory_grpo|diprec_plan_grpo) ;;
+  direct_sid) METHOD="direct_sft" ;;
+  diprec_trajectory_grpo) METHOD="diprec_traj_rl" ;;
+  diprec_plan_grpo) METHOD="diprec_plan_rl" ;;
+esac
+case "$METHOD" in
+  direct_sft|direct_rl|minionerec_sft|minionerec_rl|diprec_sft|diprec_traj_rl|diprec_plan_rl) ;;
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
 case "$MAX_HISTORY_LEN" in 10|20|50) ;; *) echo "--max_history_len must be 10, 20, or 50" >&2; exit 2 ;; esac
+case "$DATA_SOURCE" in official|raw) ;; *) echo "--data_source must be official or raw" >&2; exit 2 ;; esac
+if [[ -n "$RAW_PATH" ]]; then DATA_SOURCE="raw"; fi
+case "$SPLIT_STRATEGY" in
+  official_temporal|leave_last_two_out) ;;
+  *) echo "--split_strategy must be official_temporal or leave_last_two_out" >&2; exit 2 ;;
+esac
+if [[ "$DATA_SOURCE" == "raw" && "$SPLIT_STRATEGY" != "leave_last_two_out" ]]; then
+  echo "--data_source raw requires explicit --split_strategy leave_last_two_out" >&2
+  exit 2
+fi
 for value in "$NUM_PLANS" "$SID_BEAMS" "$EVAL_BEAMS" "$EVAL_CANDIDATE_BUDGET"; do
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
     echo "Plan/beam counts must be positive integers, got: $value" >&2
     exit 2
   fi
 done
+for value in \
+  "$SFT_MICRO_BATCH_SIZE" \
+  "$SFT_GRADIENT_ACCUMULATION_STEPS" \
+  "$BASELINE_RL_PER_DEVICE_BATCH_SIZE" \
+  "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS" \
+  "$DIPREC_RL_PER_DEVICE_BATCH_SIZE" \
+  "$DIPREC_RL_GRADIENT_ACCUMULATION_STEPS" \
+  "$DIPREC_RL_NUM_ITERATIONS"; do
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Batch settings must be positive integers, got: $value" >&2
+    exit 2
+  fi
+done
+if [[ -n "$BASELINE_RL_GENERATION_BATCH_SIZE" && ! "$BASELINE_RL_GENERATION_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Baseline RL generation batch size must be a positive integer" >&2
+  exit 2
+fi
+if [[ -n "$DIPREC_RL_GENERATION_BATCH_SIZE" && ! "$DIPREC_RL_GENERATION_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Batch settings must be positive integers, got: $DIPREC_RL_GENERATION_BATCH_SIZE" >&2
+  exit 2
+fi
 if (( EVAL_CANDIDATE_BUDGET < EVAL_BEAMS )); then
   echo "--eval_candidate_budget must be at least --eval_beams" >&2
   exit 2
 fi
 case "$METHOD" in
-  diprec_sft|diprec_trajectory_grpo|diprec_plan_grpo)
+  diprec_sft|diprec_traj_rl|diprec_plan_rl)
     if (( EVAL_CANDIDATE_BUDGET < NUM_PLANS )); then
       echo "--eval_candidate_budget must be at least --num_plans for DIPRec" >&2
       exit 2
@@ -85,11 +147,15 @@ case "$METHOD" in
     ;;
 esac
 
-DATA_DIR="data/processed/$DATASET/history_$MAX_HISTORY_LEN"
+DATA_VARIANT="history_$MAX_HISTORY_LEN"
+if [[ "$SPLIT_STRATEGY" != "official_temporal" ]]; then
+  DATA_VARIANT="${DATA_VARIANT}_${SPLIT_STRATEGY}"
+fi
+DATA_DIR="data/processed/$DATASET/$DATA_VARIANT"
 MODEL_SLUG="${MODEL//\//_}"
 MODEL_SLUG="${MODEL_SLUG// /_}"
-RUN_DIR="outputs/$DATASET/history_$MAX_HISTORY_LEN/$MODEL_SLUG/$METHOD/seed_$SEED"
-MODEL_DIR="output_dir/$DATASET/history_$MAX_HISTORY_LEN/$MODEL_SLUG/$METHOD/seed_$SEED"
+RUN_DIR="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/seed_$SEED"
+MODEL_DIR="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/seed_$SEED"
 mkdir -p "$RUN_DIR" "$MODEL_DIR"
 
 if [[ -z "$SID_INDEX" ]]; then
@@ -107,16 +173,37 @@ if [[ -z "$SID_INDEX" && "$DRY_RUN" -eq 1 ]]; then
 fi
 : "${SID_INDEX:?Cannot resolve SID index; pass --sid_index PATH}"
 
+case "$METHOD" in
+  minionerec_sft|minionerec_rl|diprec_sft|diprec_traj_rl|diprec_plan_rl)
+    if [[ -z "$ITEM_META" ]]; then
+      for candidate in \
+        "data/Amazon/index/$DATASET.item.json" \
+        "data/Amazon/$DATASET/$DATASET.item.json" \
+        "data/Amazon_Games/$DATASET/$DATASET.item.json" \
+        "data/Amazon_Office/$DATASET/$DATASET.item.json" \
+        "data/Amazon_Industrial/$DATASET/$DATASET.item.json"; do
+        if [[ -f "$candidate" ]]; then ITEM_META="$candidate"; break; fi
+      done
+    fi
+    if [[ -z "$ITEM_META" && "$DRY_RUN" -eq 1 ]]; then
+      ITEM_META="data/Amazon/index/$DATASET.item.json"
+    fi
+    : "${ITEM_META:?Cannot resolve item metadata; pass --item_meta PATH}"
+    ;;
+esac
+
 if [[ "$SKIP_PREPROCESS" -eq 0 ]]; then
   BUILD=(python3 scripts/build_long_history_data.py
     --dataset "$DATASET"
+    --source "$DATA_SOURCE"
+    --split_strategy "$SPLIT_STRATEGY"
     --sid_index "$SID_INDEX"
     --output_dir "$DATA_DIR"
     --max_history_len "$MAX_HISTORY_LEN")
   if [[ -n "$RAW_PATH" ]]; then BUILD+=(--raw_path "$RAW_PATH"); fi
   if [[ -f "$DATA_DIR/manifest.json" ]]; then
-    python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); expected=int(sys.argv[2]); assert m.get("source_kind")=="raw_event_interactions" and int(m["max_history_len"])==expected, m' "$DATA_DIR/manifest.json" "$MAX_HISTORY_LEN"
-    echo "Using existing validated long-history data: $DATA_DIR"
+    python3 -c 'import json,sys; from diprec.data import validate_processed_manifest; m=json.load(open(sys.argv[1])); source={"official":"sidreasoner_official_csv_reconstruction","raw":"raw_event_interactions"}[sys.argv[4]]; validate_processed_manifest(m,dataset=sys.argv[2],max_history_len=int(sys.argv[3]),source_kind=source,split_strategy=sys.argv[5],sid_index_path=sys.argv[6])' "$DATA_DIR/manifest.json" "$DATASET" "$MAX_HISTORY_LEN" "$DATA_SOURCE" "$SPLIT_STRATEGY" "$SID_INDEX"
+    echo "Using existing validated long-history data: $DATA_DIR (source=$DATA_SOURCE, split_strategy=$SPLIT_STRATEGY)"
   elif [[ "$DRY_RUN" -eq 1 ]]; then
     printf '[dry-run] '; printf '%q ' "${BUILD[@]}"; printf '\n'
   else
@@ -133,13 +220,18 @@ if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
   fi
 fi
 
-BASE_SFT="output_dir/$DATASET/history_$MAX_HISTORY_LEN/$MODEL_SLUG/direct_sid/seed_$SEED/final_checkpoint"
-SIDREASONER_SFT="output_dir/$DATASET/history_$MAX_HISTORY_LEN/$MODEL_SLUG/sidreasoner_sft/seed_$SEED/final_checkpoint"
-DIPREC_SFT="output_dir/$DATASET/history_$MAX_HISTORY_LEN/$MODEL_SLUG/diprec_sft/seed_$SEED/final_checkpoint"
+DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/seed_$SEED/final_checkpoint"
+MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/seed_$SEED/final_checkpoint"
+DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/seed_$SEED/final_checkpoint"
 
 checkpoint_ready() {
-  [[ -f "$1/config.json" && -f "$1/training_config.json" ]] && \
-    find "$1" -maxdepth 1 -type f \( -name 'model*.safetensors' -o -name 'pytorch_model*.bin' \) -print -quit | grep -q .
+  local checkpoint="$1" expected_method="$2" expected_parent="$3" expected_item_meta="${4:-}"
+  [[ -f "$checkpoint/config.json" && -f "$checkpoint/training_config.json" ]] || return 1
+  find "$checkpoint" -maxdepth 1 -type f \( -name 'model*.safetensors' -o -name 'pytorch_model*.bin' \) -print -quit | grep -q . || return 1
+  if [[ "$expected_method" == "diprec_sft" && "$INTEREST_PARAMETERIZATION" == "independent_head" ]]; then
+    [[ -f "$checkpoint/diprec_adapter_config.json" && -f "$checkpoint/diprec_interest_adapter.pt" ]] || return 1
+  fi
+  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10]}) if sys.argv[3]=="diprec_sft" else None; config_ok=all(training.get(k)==v for k,v in expected.items()); ok=training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION"
 }
 
 run_sft() {
@@ -158,7 +250,54 @@ run_sft() {
     --interest_parameterization "$INTEREST_PARAMETERIZATION"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"
+    --micro_batch_size "$SFT_MICRO_BATCH_SIZE"
+    --gradient_accumulation_steps "$SFT_GRADIENT_ACCUMULATION_STEPS"
     --seed "$SEED")
+  if [[ "$sft_method" == "minionerec_sft" || "$sft_method" == "diprec_sft" ]]; then
+    cmd+=(--item_meta "$ITEM_META")
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then cmd+=(--dry_run); fi
+  if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/train.jsonl" ]]; then
+    printf '[dry-run] '; printf '%q ' "${cmd[@]}"; printf '\n'
+  else
+    "${cmd[@]}"
+  fi
+}
+
+ensure_sft() {
+  local sft_method="$1" source_model="$2" destination="$3" expected_item_meta="${4:-}"
+  if checkpoint_ready "$destination" "$sft_method" "$source_model" "$expected_item_meta"; then
+    echo "Using existing validated $sft_method checkpoint: $destination"
+    return
+  fi
+  if [[ -e "$destination" && "$DRY_RUN" -eq 0 ]]; then
+    echo "Incomplete or incompatible $sft_method checkpoint at $destination; remove or relocate it before retraining" >&2
+    exit 1
+  fi
+  run_sft "$sft_method" "$source_model" "$destination"
+}
+
+run_baseline_rl() {
+  local rl_method="$1" source_model="$2" destination="$3"
+  local cmd=(bash scripts/train_baseline_grpo.sh
+    --method "$rl_method"
+    --model "$source_model"
+    --train_file "$DATA_DIR/train.jsonl"
+    --valid_file "$DATA_DIR/valid.jsonl"
+    --sid_index "$SID_INDEX"
+    --output_dir "$destination"
+    --num_generations 16
+    --per_device_batch_size "$BASELINE_RL_PER_DEVICE_BATCH_SIZE"
+    --gradient_accumulation_steps "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS"
+    --max_history_len "$MAX_HISTORY_LEN"
+    --max_seq_len "$MAX_SEQ_LEN"
+    --seed "$SEED")
+  if [[ -n "$BASELINE_RL_GENERATION_BATCH_SIZE" ]]; then
+    cmd+=(--generation_batch_size "$BASELINE_RL_GENERATION_BATCH_SIZE")
+  fi
+  if [[ "$rl_method" == "minionerec_rl" ]]; then
+    cmd+=(--item_meta "$ITEM_META")
+  fi
   if [[ "$DRY_RUN" -eq 1 ]]; then cmd+=(--dry_run); fi
   if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/train.jsonl" ]]; then
     printf '[dry-run] '; printf '%q ' "${cmd[@]}"; printf '\n'
@@ -169,59 +308,57 @@ run_sft() {
 
 TRAINED_MODEL=""
 case "$METHOD" in
-  direct_sid)
-    run_sft direct_sid "$MODEL" "$MODEL_DIR/final_checkpoint"
+  direct_sft)
+    run_sft direct_sft "$MODEL" "$MODEL_DIR/final_checkpoint"
     TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
     ;;
-  sidreasoner)
-    if ! checkpoint_ready "$BASE_SFT"; then
-      if [[ -e "$BASE_SFT" && "$DRY_RUN" -eq 0 ]]; then
-        echo "Incomplete Direct-SID checkpoint at $BASE_SFT; remove or relocate it before retraining" >&2
-        exit 1
-      fi
-      run_sft direct_sid "$MODEL" "$BASE_SFT"
-    fi
-    run_sft sidreasoner_sft "$BASE_SFT" "$SIDREASONER_SFT"
-    SIDREASONER_CMD=(bash scripts/train_sidreasoner_grpo.sh \
-      --model "$SIDREASONER_SFT" \
-      --dataset "$DATASET" \
-      --data_dir "$DATA_DIR" \
-      --sid_index "$SID_INDEX" \
-      --output_dir "$MODEL_DIR/verl" \
-      --max_seq_len "$MAX_SEQ_LEN" \
-      --num_generations "$NUM_PLANS" \
-      --seed "$SEED")
-    if [[ "$DRY_RUN" -eq 1 ]]; then SIDREASONER_CMD+=(--dry_run); fi
-    "${SIDREASONER_CMD[@]}"
-    TRAINED_MODEL="$MODEL_DIR/verl/final_checkpoint"
+  direct_rl)
+    ensure_sft direct_sft "$MODEL" "$DIRECT_SFT"
+    run_baseline_rl direct_rl "$DIRECT_SFT" "$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
+    ;;
+  minionerec_sft)
+    run_sft minionerec_sft "$MODEL" "$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
+    ;;
+  minionerec_rl)
+    ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
+    run_baseline_rl minionerec_rl "$MINIONEREC_SFT" "$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
     ;;
   diprec_sft)
-    run_sft diprec_sft "$MODEL" "$MODEL_DIR/final_checkpoint"
+    ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
+    run_sft diprec_sft "$MINIONEREC_SFT" "$MODEL_DIR/final_checkpoint"
     TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
     ;;
-  diprec_trajectory_grpo|diprec_plan_grpo)
-    if ! checkpoint_ready "$DIPREC_SFT"; then
-      if [[ -e "$DIPREC_SFT" && "$DRY_RUN" -eq 0 ]]; then
-        echo "Incomplete DIPRec-SFT checkpoint at $DIPREC_SFT; remove or relocate it before retraining" >&2
-        exit 1
-      fi
-      run_sft diprec_sft "$MODEL" "$DIPREC_SFT"
-    fi
-    MODE="${METHOD#diprec_}"
+  diprec_traj_rl|diprec_plan_rl)
+    ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
+    ensure_sft diprec_sft "$MINIONEREC_SFT" "$DIPREC_SFT" "$ITEM_META"
+    if [[ "$METHOD" == "diprec_traj_rl" ]]; then MODE="trajectory_grpo"; else MODE="plan_grpo"; fi
     GRPO_CMD=(bash scripts/train_diprec_grpo.sh
       --mode "$MODE"
       --model "$DIPREC_SFT"
       --train_file "$DATA_DIR/train.jsonl"
       --sid_index "$SID_INDEX"
+      --item_meta "$ITEM_META"
       --output_dir "$MODEL_DIR/final_checkpoint"
       --interest_topk "$INTEREST_TOPK"
+      --interest_strategy "$INTEREST_STRATEGY"
+      --time_decay "$TIME_DECAY"
       --num_plans "$NUM_PLANS"
       --sid_beams "$SID_BEAMS"
       --conditioning "$CONDITIONING"
       --interest_parameterization "$INTEREST_PARAMETERIZATION"
       --max_history_len "$MAX_HISTORY_LEN"
       --max_seq_len "$MAX_SEQ_LEN"
+      --per_device_batch_size "$DIPREC_RL_PER_DEVICE_BATCH_SIZE"
+      --gradient_accumulation_steps "$DIPREC_RL_GRADIENT_ACCUMULATION_STEPS"
+      --num_iterations "$DIPREC_RL_NUM_ITERATIONS"
+      --beta "$DIPREC_RL_BETA"
       --seed "$SEED")
+    if [[ -n "$DIPREC_RL_GENERATION_BATCH_SIZE" ]]; then
+      GRPO_CMD+=(--generation_batch_size "$DIPREC_RL_GENERATION_BATCH_SIZE")
+    fi
     if [[ "$DRY_RUN" -eq 1 ]]; then GRPO_CMD+=(--dry_run); fi
     if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/train.jsonl" ]]; then
       printf '[dry-run] '; printf '%q ' "${GRPO_CMD[@]}"; printf '\n'
@@ -241,6 +378,8 @@ EVAL_CMD=(bash scripts/eval_diprec.sh
   --output "$RUN_DIR/metrics.json"
   --split test
   --interest_topk "$INTEREST_TOPK"
+  --interest_strategy "$INTEREST_STRATEGY"
+  --time_decay "$TIME_DECAY"
   --num_plans "$NUM_PLANS"
   --sid_beams "$SID_BEAMS"
   --eval_beams "$EVAL_BEAMS"
@@ -250,6 +389,11 @@ EVAL_CMD=(bash scripts/eval_diprec.sh
   --max_history_len "$MAX_HISTORY_LEN"
   --max_seq_len "$MAX_SEQ_LEN"
   --seed "$SEED")
+case "$METHOD" in
+  minionerec_sft|minionerec_rl|diprec_sft|diprec_traj_rl|diprec_plan_rl)
+    EVAL_CMD+=(--item_meta "$ITEM_META")
+    ;;
+esac
 if [[ "$DRY_RUN" -eq 1 ]]; then EVAL_CMD+=(--dry_run); fi
 if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/test.jsonl" ]]; then
   printf '[dry-run] '; printf '%q ' "${EVAL_CMD[@]}"; printf '\n'

@@ -21,7 +21,9 @@ def main() -> None:
         if payload.get("schema_version") != "diprec.metrics.v1":
             continue
         metrics = payload.get("metrics", {})
-        config = payload.get("training_config", {})
+        training_config = payload.get("training_config", {})
+        # Older v1 result files stored evaluation knobs inside training_config.
+        config = payload.get("evaluation_config") or training_config
         rows.append(
             {
                 "dataset": payload.get("dataset"),
@@ -42,7 +44,9 @@ def main() -> None:
                 "max_seq_len": config.get("max_seq_len"),
                 "interest_topk": config.get("interest_topk"),
                 "num_plans": config.get("num_plans"),
-                "sid_beams": config.get("sid_beams"),
+                "sid_beams": config.get(
+                    "training_sid_beams", training_config.get("sid_beams")
+                ),
                 "eval_beams": config.get("eval_beams"),
                 "eval_candidate_budget": config.get("eval_candidate_budget"),
                 "conditioning": config.get("conditioning"),

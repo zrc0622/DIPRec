@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank Amazon categories using untruncated event-level history lengths."""
+"""Rank Amazon categories by complete per-user history lengths."""
 
 from __future__ import annotations
 
@@ -11,7 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from diprec.constants import canonical_dataset
-from diprec.data import raw_history_statistics, resolve_raw_path
+from diprec.data import (
+    load_sid_map,
+    official_history_statistics,
+    raw_history_statistics,
+    resolve_official_csv_paths,
+    resolve_raw_path,
+    resolve_sid_index,
+)
 
 
 def _overrides(values: list[str]) -> dict[str, Path]:
@@ -28,12 +35,22 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--datasets", required=True, help="Comma-separated dataset names")
     parser.add_argument("--top_n", type=int, default=2, choices=(1, 2))
-    parser.add_argument("--data_root", default="data/Amazon/raw")
+    parser.add_argument(
+        "--source",
+        choices=("official", "raw"),
+        default="official",
+        help="Use the complete SIDReasoner CSV triplets (default) or event-level raw files",
+    )
+    parser.add_argument("--official_data_root", default="data/Amazon")
+    parser.add_argument("--sid_data_root", default="data/Amazon")
+    parser.add_argument("--data_root", default="data/Amazon/raw", help="Raw-event root used with --source raw")
     parser.add_argument("--raw_paths", action="append", default=[], metavar="DATASET=PATH")
     parser.add_argument("--min_user_interactions", type=int, default=3)
     parser.add_argument("--stats_output", default="outputs/history_length_stats.csv")
     parser.add_argument("--selection_output", default="configs/selected_long_history_datasets.txt")
     args = parser.parse_args()
+    if args.raw_paths and args.source != "raw":
+        parser.error("--raw_paths requires --source raw")
 
     datasets = [canonical_dataset(name) for name in args.datasets.split(",") if name.strip()]
     if not datasets:
@@ -41,9 +58,27 @@ def main() -> None:
     overrides = _overrides(args.raw_paths)
     rows = []
     for dataset in datasets:
-        path = overrides.get(dataset) or resolve_raw_path(dataset, args.data_root)
-        stats = raw_history_statistics(path, args.min_user_interactions)
-        rows.append({"dataset": dataset, "raw_file": str(path), **stats})
+        if args.source == "official":
+            split_paths = resolve_official_csv_paths(dataset, args.official_data_root)
+            sid_path = resolve_sid_index(dataset, args.sid_data_root)
+            stats = official_history_statistics(
+                split_paths,
+                load_sid_map(sid_path),
+                args.min_user_interactions,
+            )
+            source_files = ";".join(str(split_paths[split]) for split in ("train", "valid", "test"))
+        else:
+            path = overrides.get(dataset) or resolve_raw_path(dataset, args.data_root)
+            stats = raw_history_statistics(path, args.min_user_interactions)
+            source_files = str(path)
+        rows.append(
+            {
+                "dataset": dataset,
+                "source_kind": args.source,
+                "source_files": source_files,
+                **stats,
+            }
+        )
 
     rows.sort(
         key=lambda row: (
@@ -59,7 +94,8 @@ def main() -> None:
     fields = [
         "rank",
         "dataset",
-        "raw_file",
+        "source_kind",
+        "source_files",
         "total_users",
         "effective_users",
         "interactions",
@@ -72,7 +108,7 @@ def main() -> None:
         "min_user_interactions",
     ]
     with stats_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         for rank, row in enumerate(rows, 1):
             formatted = dict(row, rank=rank)

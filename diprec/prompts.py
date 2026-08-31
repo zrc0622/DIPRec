@@ -38,6 +38,43 @@ def history_prompt(record: Mapping[str, object], max_history_len: int, reasoning
     )
 
 
+def title_to_sid_prompt(title: str) -> str:
+    return f'Which item has the title: "{title}"? Output exactly one valid three-level SID.'
+
+
+def description_to_sid_prompt(description: str) -> str:
+    return (
+        f'An item is described as follows: "{description}". '
+        "Which item is it? Output exactly one valid three-level SID."
+    )
+
+
+def sid_to_title_prompt(sid: str) -> str:
+    return f'What is the title of item "{sid}"? Output only its title.'
+
+
+def history_to_title_prompt(record: Mapping[str, object], max_history_len: int) -> str:
+    history = ", ".join(_history(record, max_history_len))
+    return (
+        f"The user interacted with these item SIDs in chronological order: {history}. "
+        "Recommend the next item and output only its title."
+    )
+
+
+def title_history_to_sid_prompt(
+    record: Mapping[str, object],
+    item_metadata: Mapping[str, Mapping[str, object]],
+    max_history_len: int,
+) -> str:
+    retained_ids = list(record["history_item_id"])[-max_history_len:]  # type: ignore[arg-type]
+    titles = [f'"{item_metadata[str(item_id)]["title"]}"' for item_id in retained_ids]
+    return (
+        "Given the title sequence of the user's historical items: "
+        f"{', '.join(titles)}, recommend the next item. "
+        "Output exactly one valid three-level SID."
+    )
+
+
 def plan_prompt(record: Mapping[str, object], max_history_len: int, interest_topk: int) -> str:
     history = ", ".join(_history(record, max_history_len))
     return (

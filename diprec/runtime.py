@@ -4,11 +4,46 @@ from __future__ import annotations
 
 import json
 import random
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .interest import TokenRegistry, register_sid_tokens, register_tokens
 from .modeling import InterestParameterRouter
+
+
+_ACTIVE_INTEREST_ROUTER: ContextVar[InterestParameterRouter | None] = ContextVar(
+    "active_interest_router", default=None
+)
+
+
+def set_active_interest_router(router: InterestParameterRouter | None) -> None:
+    """Keep hook-backed adapter parameters reachable through trainer wrapping."""
+
+    _ACTIVE_INTEREST_ROUTER.set(router)
+
+
+def get_active_interest_router() -> InterestParameterRouter | None:
+    return _ACTIVE_INTEREST_ROUTER.get()
+
+
+def require_replicated_generation_backend(trainer: Any, component: str) -> None:
+    """Reject sharded model backends used by main-rank-only generation."""
+
+    unsupported = []
+    if getattr(trainer, "is_deepspeed_enabled", False):
+        unsupported.append("DeepSpeed")
+    if getattr(trainer, "is_fsdp_enabled", False):
+        unsupported.append("FSDP")
+    if getattr(trainer, "is_tp_enabled", False):
+        unsupported.append("tensor parallelism")
+    if unsupported:
+        backends = "/".join(unsupported)
+        raise RuntimeError(
+            f"{component} uses centralized generation and requires a complete policy replica "
+            f"on every rank; {backends} is not supported. Use single-process training or "
+            "ordinary replicated DDP."
+        )
 
 
 def require_torch_transformers():
@@ -120,11 +155,20 @@ def load_model_runtime(
         router.assert_parameter_isolation(registry.sid_token_ids)
     elif include_interest and parameterization != "disjoint_rows":
         raise ValueError("interest_parameterization must be independent_head or disjoint_rows")
+    set_active_interest_router(router)
     model.config.use_cache = not training
     return model, tokenizer, registry, router
 
 
-def save_runtime(model: Any, tokenizer: Any, router: InterestParameterRouter | None, output_dir: str | Path, mode: str) -> None:
+def save_runtime(
+    model: Any,
+    tokenizer: Any,
+    router: InterestParameterRouter | None,
+    output_dir: str | Path,
+    mode: str,
+    *,
+    safe_serialization: bool = True,
+) -> None:
     import torch
 
     destination = Path(output_dir)
@@ -134,7 +178,11 @@ def save_runtime(model: Any, tokenizer: Any, router: InterestParameterRouter | N
         state_dict = {
             key: value for key, value in state_dict.items() if not key.startswith("diprec_interest_adapter.")
         }
-    model.save_pretrained(destination, state_dict=state_dict, safe_serialization=True)
+    model.save_pretrained(
+        destination,
+        state_dict=state_dict,
+        safe_serialization=safe_serialization,
+    )
     tokenizer.save_pretrained(destination)
     if router is not None:
         config = {

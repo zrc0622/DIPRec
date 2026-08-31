@@ -80,7 +80,14 @@ class InterestParameterRouter:
         hidden = inputs[0]
         independent = self.adapter.output_head(hidden)
         result = output.clone()
-        result[..., self.adapter.global_ids.to(result.device)] = independent
+        # DDP broadcasts module buffers in place before each forward. Advanced
+        # indexing saves its index tensor for backward, so retaining a view of
+        # ``global_ids`` here makes a later forward bump that saved tensor's
+        # version and fail when the combined loss is backpropagated. A detached
+        # clone is tiny (only the routed vocabulary rows) and decouples autograd
+        # from DDP's buffer synchronization.
+        routed_ids = self.adapter.global_ids.to(result.device).detach().clone()
+        result[..., routed_ids] = independent
         return result
 
     def close(self) -> None:

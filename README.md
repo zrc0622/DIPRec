@@ -1,5 +1,9 @@
 # SIDReasoner
 
+> DIPRec 七组对比实验的精简步骤与命令见 [MY_README_ZH.md](MY_README_ZH.md)；English guide: [MY_README.md](MY_README.md). 七模型使用独立 Python 3.11 + TRL 0.24 环境；下方原 SIDReasoner/VeRL 文档及其环境要求保持不变，并与七模型环境分开。
+
+> **DIPRec RL 修正说明：** `diprec_traj_rl` / `diprec_plan_rl` 已迁移至 TRL 0.24：使用固定 DIPRec-SFT reference KL、复用 rollout 的多轮更新和有效 PPO clipping；`diprec_plan_rl` 仍保留 plan/SID 两级 advantage。
+
 This is the code implementation for **"SIDReasoner - Reasoning over Semantic IDs Enhances Generative Recommendation"**.
 
 SIDReasoner is a generative recommendation framework that strengthens generative recommenders with reasoning ability over semantic IDs. This repository provides:

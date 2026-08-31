@@ -1,9 +1,10 @@
-"""Raw interaction IO and leak-free long-history sample construction.
+"""Interaction IO and leak-free long-history sample construction.
 
-The functions in this module intentionally do not accept SIDReasoner's legacy
-history CSV as a raw source.  Those files already contain materialized (and
-often ten-item-truncated) histories, so they cannot support dataset selection
-or a genuine 50-item experiment.
+SIDReasoner's released CSV rows contain ten-item sliding windows, but the
+complete train/valid/test triplet contains consecutive targets.  The windows
+can therefore be joined back into full per-user sequences after strict
+continuity and SID checks.  Raw event files remain supported as an explicit
+alternative when their item IDs already use the SID index namespace.
 """
 
 from __future__ import annotations
@@ -33,6 +34,8 @@ FORBIDDEN_HISTORY_FIELDS = {
 }
 SID_RE = re.compile(r"<[^<>]+>")
 INDEX_RE = re.compile(r"(-?\d+)(?!.*\d)")
+OFFICIAL_SPLITS = ("train", "valid", "test")
+OFFICIAL_HISTORY_WINDOW = 10
 
 
 @dataclass(frozen=True)
@@ -154,6 +157,38 @@ def resolve_raw_path(dataset: str, data_root: str | Path = "data/Amazon/raw") ->
     )
 
 
+def resolve_official_csv_paths(
+    dataset: str,
+    data_root: str | Path = "data/Amazon",
+) -> dict[str, Path]:
+    """Resolve one released SIDReasoner CSV for each official split."""
+
+    category = canonical_dataset(dataset)
+    root = Path(data_root)
+    result: dict[str, Path] = {}
+    for split in OFFICIAL_SPLITS:
+        directory = root / split
+        exact = directory / f"{category}_5_2016-10-2018-11.csv"
+        if exact.is_file():
+            result[split] = exact
+            continue
+        matches = sorted(directory.glob(f"{category}*.csv"))
+        if len(matches) == 1:
+            result[split] = matches[0]
+            continue
+        if not matches:
+            raise FileNotFoundError(
+                f"Missing official {split} CSV for {category} below {directory}. "
+                "Download the complete SIDReasoner data package (train, valid, test, and index)."
+            )
+        rendered = ", ".join(str(path) for path in matches)
+        raise ValueError(
+            f"Multiple official {split} CSV candidates for {category}: {rendered}. "
+            "Keep only the matching SIDReasoner release file."
+        )
+    return result
+
+
 def resolve_sid_index(dataset: str, data_root: str | Path = "data/Amazon") -> Path:
     category = canonical_dataset(dataset)
     root = Path(data_root)
@@ -170,6 +205,27 @@ def resolve_sid_index(dataset: str, data_root: str | Path = "data/Amazon") -> Pa
     raise FileNotFoundError(
         f"SID index for {category} not found. Pass --sid_index; expected e.g. "
         f"data/Amazon/index/{category}.index.json"
+    )
+
+
+def resolve_item_metadata(dataset: str, data_root: str | Path = "data/Amazon") -> Path:
+    """Resolve the item metadata paired with a released SID index."""
+
+    category = canonical_dataset(dataset)
+    root = Path(data_root)
+    candidates = (
+        root / "index" / f"{category}.item.json",
+        root / category / f"{category}.item.json",
+        Path(f"data/Amazon_{'Games' if category == 'Video_Games' else category.split('_')[0]}")
+        / category
+        / f"{category}.item.json",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise FileNotFoundError(
+        f"Item metadata for {category} not found. Pass --item_meta; expected e.g. "
+        f"data/Amazon/index/{category}.item.json"
     )
 
 
@@ -252,6 +308,200 @@ def load_sid_map(path: str | Path) -> dict[str, tuple[str, str, str]]:
     return {str(item): parse_sid_levels(levels) for item, levels in raw.items()}
 
 
+def load_item_metadata(
+    path: str | Path,
+    sid_map: Mapping[str, Sequence[str]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Load MiniOneRec item features and validate the SID/catalog namespace."""
+
+    source = Path(path)
+    with source.open("r", encoding="utf-8") as handle:
+        raw = json.load(handle)
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"Item metadata must be a JSON object: {source}")
+    metadata: dict[str, dict[str, Any]] = {}
+    for raw_item_id, raw_features in raw.items():
+        item_id = str(raw_item_id)
+        if not isinstance(raw_features, Mapping):
+            raise ValueError(f"Item metadata for {item_id!r} must be an object: {source}")
+        title = str(raw_features.get("title") or "").strip()
+        if not title:
+            raise ValueError(f"Item metadata for {item_id!r} has no title: {source}")
+        metadata[item_id] = {str(key): value for key, value in raw_features.items()}
+        metadata[item_id]["title"] = title
+    if sid_map is not None:
+        missing = sorted(set(map(str, sid_map)) - set(metadata))
+        if missing:
+            raise ValueError(
+                f"Item metadata {source} is missing {len(missing)} SID-index items; "
+                f"first missing IDs: {', '.join(missing[:5])}"
+            )
+    return metadata
+
+
+def _literal_list(value: Any, *, field: str, source: Path, line_number: int) -> list[Any]:
+    if isinstance(value, list):
+        parsed = value
+    else:
+        try:
+            parsed = ast.literal_eval(str(value))
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"{source}:{line_number}: invalid {field} list") from exc
+    if not isinstance(parsed, list):
+        raise ValueError(f"{source}:{line_number}: {field} must be a list")
+    return parsed
+
+
+def reconstruct_official_sequences(
+    split_paths: Mapping[str, str | Path],
+    sid_map: Mapping[str, Sequence[str]],
+    history_window: int = OFFICIAL_HISTORY_WINDOW,
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """Reconstruct full item-ID sequences from released sliding-window CSVs.
+
+    Files must be supplied in the original train/valid/test triplet.  For each
+    user, every row's materialized history must exactly equal the suffix of the
+    sequence reconstructed from earlier rows.  This makes missing, reordered,
+    or mixed-release files fail instead of silently producing incorrect SIDs.
+    """
+
+    if history_window < 1:
+        raise ValueError("history_window must be positive")
+    missing = [split for split in OFFICIAL_SPLITS if split not in split_paths]
+    if missing:
+        raise ValueError(f"Official CSV set is incomplete; missing splits: {', '.join(missing)}")
+
+    sequences: dict[str, list[str]] = {}
+    rows_by_split: dict[str, int] = {}
+    item_ids: set[str] = set()
+    required_fields = {
+        "user_id",
+        "history_item_id",
+        "item_id",
+        "history_item_sid",
+        "item_sid",
+    }
+    for split in OFFICIAL_SPLITS:
+        source = Path(split_paths[split])
+        if not source.is_file():
+            raise FileNotFoundError(f"Official {split} CSV not found: {source}")
+        row_count = 0
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            missing_fields = required_fields - set(reader.fieldnames or [])
+            if missing_fields:
+                raise ValueError(
+                    f"{source} is missing required official CSV fields: {sorted(missing_fields)}"
+                )
+            for line_number, row in enumerate(reader, 2):
+                row_count += 1
+                user_id = str(row["user_id"]).strip()
+                if not user_id:
+                    raise ValueError(f"{source}:{line_number}: empty user_id")
+                history_ids = [
+                    str(item) for item in _literal_list(
+                        row["history_item_id"],
+                        field="history_item_id",
+                        source=source,
+                        line_number=line_number,
+                    )
+                ]
+                history_sids = [
+                    str(sid) for sid in _literal_list(
+                        row["history_item_sid"],
+                        field="history_item_sid",
+                        source=source,
+                        line_number=line_number,
+                    )
+                ]
+                target_id = str(row["item_id"]).strip()
+                target_sid = str(row["item_sid"]).strip()
+                if not history_ids or len(history_ids) > history_window:
+                    raise ValueError(
+                        f"{source}:{line_number}: expected 1..{history_window} official history items, "
+                        f"got {len(history_ids)}"
+                    )
+                if len(history_ids) != len(history_sids):
+                    raise ValueError(
+                        f"{source}:{line_number}: history item/SID lengths differ "
+                        f"({len(history_ids)} != {len(history_sids)})"
+                    )
+
+                for item_id, observed_sid in zip(history_ids, history_sids):
+                    if item_id not in sid_map:
+                        raise ValueError(f"{source}:{line_number}: history item {item_id!r} is absent from SID index")
+                    expected_sid = joined_sid(sid_map[item_id])
+                    if observed_sid != expected_sid:
+                        raise ValueError(
+                            f"{source}:{line_number}: SID mismatch for history item {item_id!r}: "
+                            f"CSV={observed_sid!r}, index={expected_sid!r}"
+                        )
+                if target_id not in sid_map:
+                    raise ValueError(f"{source}:{line_number}: target item {target_id!r} is absent from SID index")
+                expected_target_sid = joined_sid(sid_map[target_id])
+                if target_sid != expected_target_sid:
+                    raise ValueError(
+                        f"{source}:{line_number}: SID mismatch for target item {target_id!r}: "
+                        f"CSV={target_sid!r}, index={expected_target_sid!r}"
+                    )
+
+                if user_id not in sequences:
+                    if len(history_ids) != 1:
+                        raise ValueError(
+                            f"{source}:{line_number}: first row for user {user_id!r} starts with "
+                            f"{len(history_ids)} history items; the official split set is incomplete or reordered"
+                        )
+                    sequences[user_id] = history_ids + [target_id]
+                else:
+                    previous = sequences[user_id]
+                    expected_history = previous[-history_window:]
+                    if history_ids != expected_history:
+                        raise ValueError(
+                            f"{source}:{line_number}: discontinuous window for user {user_id!r}; "
+                            "train/valid/test may be missing, reordered, or from different releases"
+                        )
+                    previous.append(target_id)
+                item_ids.update(history_ids)
+                item_ids.add(target_id)
+        rows_by_split[split] = row_count
+
+    return sequences, {
+        "official_rows_by_split": rows_by_split,
+        "official_users": len(sequences),
+        "official_items": len(item_ids),
+        "official_history_window": history_window,
+    }
+
+
+def interactions_from_sequences(sequences: Mapping[str, Sequence[str]]) -> Iterator[Interaction]:
+    """Yield ordered events from already reconstructed per-user sequences."""
+
+    source_order = 0
+    for user_id, items in sequences.items():
+        for position, item_id in enumerate(items):
+            yield Interaction(str(user_id), str(item_id), (0, position), source_order)
+            source_order += 1
+
+
+def official_history_statistics(
+    split_paths: Mapping[str, str | Path],
+    sid_map: Mapping[str, Sequence[str]],
+    min_user_interactions: int = 3,
+) -> dict[str, Any]:
+    sequences, reconstruction = reconstruct_official_sequences(split_paths, sid_map)
+    effective_lengths = [
+        len(items) for items in sequences.values() if len(items) >= min_user_interactions
+    ]
+    stats = length_statistics(effective_lengths)
+    stats.update(
+        total_users=len(sequences),
+        interactions=sum(len(items) for items in sequences.values()),
+        min_user_interactions=min_user_interactions,
+        **reconstruction,
+    )
+    return stats
+
+
 def sid_index(level1_sid: str) -> int:
     match = INDEX_RE.search(level1_sid)
     if not match:
@@ -298,6 +548,84 @@ def _sample_record(
     }
 
 
+def build_official_temporal_samples(
+    split_paths: Mapping[str, str | Path],
+    sid_map: Mapping[str, Sequence[str]],
+    dataset: str,
+    max_history_len: int = 50,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, int], dict[str, Any]]:
+    """Expand histories while preserving every released split row.
+
+    SIDReasoner creates one next-item row for every legal user prefix, sorts
+    those rows globally by target time, and then publishes an 8:1:1 split.
+    Reconstruction recovers the prefix hidden by its ten-item CSV window; this
+    function changes only that history field and never reallocates a target.
+    """
+
+    if max_history_len < 1:
+        raise ValueError("max_history_len must be positive")
+    sequences, reconstruction = reconstruct_official_sequences(split_paths, sid_map)
+    splits: dict[str, list[dict[str, Any]]] = {split: [] for split in OFFICIAL_SPLITS}
+    next_position: dict[str, int] = {}
+    train_users: set[str] = set()
+
+    for split in OFFICIAL_SPLITS:
+        source = Path(split_paths[split])
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            for line_number, row in enumerate(csv.DictReader(handle), 2):
+                user_id = str(row["user_id"]).strip()
+                target_id = str(row["item_id"]).strip()
+                target_position = next_position.get(user_id, 1)
+                ordered_items = sequences[user_id]
+                if target_position >= len(ordered_items) or ordered_items[target_position] != target_id:
+                    raise ValueError(
+                        f"{source}:{line_number}: target position changed after official "
+                        "sequence validation"
+                    )
+                splits[split].append(
+                    _sample_record(
+                        dataset=dataset,
+                        user_id=user_id,
+                        split=split,
+                        target_position=target_position,
+                        ordered_items=ordered_items,
+                        sid_map=sid_map,
+                        max_history_len=max_history_len,
+                    )
+                )
+                next_position[user_id] = target_position + 1
+                if split == "train":
+                    train_users.add(user_id)
+
+    incomplete = [
+        user_id
+        for user_id, items in sequences.items()
+        if next_position.get(user_id, 1) != len(items)
+    ]
+    if incomplete:
+        raise ValueError(
+            "Official targets did not consume the reconstructed sequences for users: "
+            + ", ".join(sorted(incomplete)[:5])
+        )
+    observed_counts = {split: len(records) for split, records in splits.items()}
+    if observed_counts != reconstruction["official_rows_by_split"]:
+        raise ValueError(
+            "Official split row counts changed during history expansion: "
+            f"expected {reconstruction['official_rows_by_split']}, got {observed_counts}"
+        )
+
+    total_events = sum(len(items) for items in sequences.values())
+    counters = {
+        "total_source_events": total_events,
+        "mapped_sid_events": total_events,
+        "users_with_mapped_events": len(sequences),
+        "effective_users": len(sequences),
+        "train_users": len(train_users),
+        "dropped_unknown_sid_events": 0,
+    }
+    return splits, counters, reconstruction
+
+
 def build_chronological_samples(
     events: Iterable[Interaction],
     sid_map: Mapping[str, Sequence[str]],
@@ -315,11 +643,15 @@ def build_chronological_samples(
     if max_history_len < 1:
         raise ValueError("max_history_len must be positive")
     users: dict[str, list[Interaction]] = defaultdict(list)
+    total_events = 0
+    mapped_events = 0
     dropped_unknown = 0
     for event in events:
+        total_events += 1
         if event.item_id not in sid_map:
             dropped_unknown += 1
             continue
+        mapped_events += 1
         users[event.user_id].append(event)
 
     splits: dict[str, list[dict[str, Any]]] = {"train": [], "valid": [], "test": []}
@@ -359,6 +691,8 @@ def build_chronological_samples(
                 )
             )
     counters = {
+        "total_source_events": total_events,
+        "mapped_sid_events": mapped_events,
         "users_with_mapped_events": len(users),
         "effective_users": effective_users,
         "train_users": train_users,
@@ -430,12 +764,82 @@ def validate_history_records(
         if before < len(history_ids):
             raise ValueError(f"Invalid pre-truncation length in sample {record.get('sample_id')}")
     if require_raw_manifest is not None:
-        if require_raw_manifest.get("source_kind") != "raw_event_interactions":
-            raise ValueError("Manifest does not certify an untruncated event-level source")
+        supported_sources = {
+            "raw_event_interactions",
+            "sidreasoner_official_csv_reconstruction",
+        }
+        if require_raw_manifest.get("source_kind") not in supported_sources:
+            raise ValueError(
+                "Manifest does not certify a complete event sequence or a validated "
+                "SIDReasoner sliding-window reconstruction"
+            )
         built_cap = int(require_raw_manifest.get("max_history_len", -1))
         if built_cap != requested_max_history_len:
             raise ValueError(f"Data were built with cap {built_cap}, requested {requested_max_history_len}")
     return sample_length_statistics(records, requested_max_history_len)
+
+
+def processed_data_fingerprint(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the immutable data identity stored with a model checkpoint."""
+
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "dataset": manifest.get("dataset"),
+        "source_kind": manifest.get("source_kind"),
+        "source_sha256": manifest.get("source_sha256"),
+        "sid_index_sha256": manifest.get("sid_index_sha256"),
+        "split_strategy": manifest.get("split_strategy"),
+        "max_history_len": manifest.get("max_history_len"),
+    }
+
+
+def validate_checkpoint_training_contract(
+    checkpoint: str | Path,
+    *,
+    expected_method: str,
+    manifest: Mapping[str, Any],
+    item_meta_path: str | Path | None = None,
+    expected_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Reject a dependency checkpoint trained under an incompatible contract."""
+
+    config_path = Path(checkpoint) / "training_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint {checkpoint} has no training_config.json; expected a completed "
+            f"{expected_method} dependency"
+        )
+    training = json.loads(config_path.read_text(encoding="utf-8"))
+    if training.get("method") != expected_method:
+        raise ValueError(
+            f"Checkpoint {checkpoint} was trained as {training.get('method')!r}, "
+            f"expected {expected_method!r}"
+        )
+    expected_data = processed_data_fingerprint(manifest)
+    if training.get("data_manifest") != expected_data:
+        raise ValueError(f"Checkpoint {checkpoint} was trained from a different processed-data manifest")
+    if item_meta_path is not None:
+        actual_item_hash = sha256_file(item_meta_path)
+        if training.get("item_meta_sha256") != actual_item_hash:
+            raise ValueError(
+                f"Checkpoint {checkpoint} was trained with different item metadata"
+            )
+    if expected_config:
+        mismatches = {
+            key: (training.get(key), expected)
+            for key, expected in expected_config.items()
+            if training.get(key) != expected
+        }
+        if mismatches:
+            details = ", ".join(
+                f"{key}: checkpoint={actual!r}, requested={expected!r}"
+                for key, (actual, expected) in mismatches.items()
+            )
+            raise ValueError(
+                f"Checkpoint {checkpoint} has an incompatible training configuration "
+                f"({details})"
+            )
+    return training
 
 
 def validate_manifest_sid_index(manifest: Mapping[str, Any], sid_index_path: str | Path) -> None:
@@ -448,3 +852,77 @@ def validate_manifest_sid_index(manifest: Mapping[str, Any], sid_index_path: str
             f"SID index checksum mismatch: data were built with {expected}, but {sid_index_path} is {actual}. "
             "All methods must use the exact same SID mapping; rebuild or pass the matching file."
         )
+
+
+def validate_manifest_sources(
+    manifest: Mapping[str, Any],
+    expected_source_kind: str | None = None,
+) -> None:
+    """Verify the source files recorded by a long-history manifest."""
+
+    source_kind = manifest.get("source_kind")
+    if expected_source_kind is not None and source_kind != expected_source_kind:
+        raise ValueError(
+            f"Data source mismatch: manifest uses {source_kind!r}, requested {expected_source_kind!r}"
+        )
+    source_files = manifest.get("source_files")
+    source_checksums = manifest.get("source_sha256")
+    if not isinstance(source_files, Mapping) or not isinstance(source_checksums, Mapping):
+        # Backward compatibility for manifests written before source_files was introduced.
+        raw_file = manifest.get("raw_file")
+        raw_sha256 = manifest.get("raw_sha256")
+        if source_kind == "raw_event_interactions" and raw_file and raw_sha256:
+            source_files = {"raw": raw_file}
+            source_checksums = {"raw": raw_sha256}
+        else:
+            raise ValueError("Long-history manifest is missing source files or checksums")
+    if set(source_files) != set(source_checksums):
+        raise ValueError("Long-history manifest source files and checksums do not have matching keys")
+    if source_kind == "sidreasoner_official_csv_reconstruction" and set(source_files) != set(OFFICIAL_SPLITS):
+        raise ValueError("Official reconstruction manifest must contain train, valid, and test sources")
+    for label, value in source_files.items():
+        path = Path(str(value))
+        if not path.is_file():
+            raise FileNotFoundError(f"Long-history source file is missing ({label}): {path}")
+        actual = sha256_file(path)
+        expected = str(source_checksums[label])
+        if actual != expected:
+            raise ValueError(
+                f"Source checksum mismatch for {label}: data were built with {expected}, "
+                f"but {path} is {actual}. Rebuild the processed data."
+            )
+
+
+def validate_processed_manifest(
+    manifest: Mapping[str, Any],
+    *,
+    dataset: str,
+    max_history_len: int,
+    source_kind: str,
+    split_strategy: str,
+    sid_index_path: str | Path,
+) -> None:
+    """Validate an existing processed-data manifest before reusing it."""
+
+    if manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError(
+            f"Data schema mismatch: expected {SCHEMA_VERSION!r}, "
+            f"found {manifest.get('schema_version')!r}"
+        )
+    expected_dataset = canonical_dataset(dataset)
+    if manifest.get("dataset") != expected_dataset:
+        raise ValueError(
+            f"Dataset mismatch: manifest uses {manifest.get('dataset')!r}, "
+            f"requested {expected_dataset!r}"
+        )
+    built_cap = int(manifest.get("max_history_len", -1))
+    if built_cap != max_history_len:
+        raise ValueError(f"Data were built with cap {built_cap}, requested {max_history_len}")
+    built_strategy = manifest.get("split_strategy")
+    if built_strategy != split_strategy:
+        raise ValueError(
+            f"Split strategy mismatch: manifest uses {built_strategy!r}, "
+            f"requested {split_strategy!r}. Rebuild or select the matching processed data."
+        )
+    validate_manifest_sources(manifest, source_kind)
+    validate_manifest_sid_index(manifest, sid_index_path)

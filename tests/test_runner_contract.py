@@ -11,9 +11,34 @@ class RunnerContractTest(unittest.TestCase):
     def test_all_comparisons_order_is_dependency_safe(self):
         script = (ROOT / "scripts/run_all_comparisons.sh").read_text(encoding="utf-8")
         self.assertIn(
-            "METHODS=(direct_sid sidreasoner diprec_sft diprec_trajectory_grpo diprec_plan_grpo)",
+            "METHODS=(direct_sft direct_rl minionerec_sft minionerec_rl "
+            "diprec_sft diprec_traj_rl diprec_plan_rl)",
             script,
         )
+        runner = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"',
+            runner,
+        )
+        self.assertIn('run_sft diprec_sft "$MINIONEREC_SFT"', runner)
+        self.assertIn(
+            'ensure_sft diprec_sft "$MINIONEREC_SFT" "$DIPREC_SFT" "$ITEM_META"',
+            runner,
+        )
+
+    def test_training_wrappers_expose_replicated_ddp_launch(self):
+        for name in (
+            "train_diprec_sft.sh",
+            "train_baseline_grpo.sh",
+            "train_diprec_grpo.sh",
+        ):
+            with self.subTest(script=name):
+                script = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+                self.assertIn('"${DIPREC_DDP:-0}" == "1"', script)
+                self.assertIn(
+                    'accelerate launch --multi_gpu --num_processes "${DIPREC_NUM_PROCESSES:-2}"',
+                    script,
+                )
 
     def test_diprec_rejects_candidate_budget_below_plan_count(self):
         result = subprocess.run(
@@ -21,7 +46,7 @@ class RunnerContractTest(unittest.TestCase):
                 "bash",
                 "scripts/run_experiment.sh",
                 "--method",
-                "diprec_plan_grpo",
+                "diprec_plan_rl",
                 "--dataset",
                 "Games",
                 "--num_plans",
@@ -59,8 +84,227 @@ class RunnerContractTest(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("data/processed/Video_Games/history_50", result.stdout)
+        self.assertIn("--source official", result.stdout)
+        self.assertIn("--split_strategy official_temporal", result.stdout)
         self.assertIn("--eval_candidate_budget 80", result.stdout)
 
+    def test_leave_last_two_out_uses_an_isolated_output_path(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "direct_sft",
+                "--dataset",
+                "Games",
+                "--split_strategy",
+                "leave_last_two_out",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("history_50_leave_last_two_out", result.stdout)
+
+    def test_both_trl_baselines_dry_run_without_importing_trl(self):
+        for method in ("direct_rl", "minionerec_rl"):
+            with self.subTest(method=method):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "scripts/run_experiment.sh",
+                        "--method",
+                        method,
+                        "--dataset",
+                        "Games",
+                        "--dry_run",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    f"scripts/train_baseline_grpo.sh --method {method}",
+                    result.stdout,
+                )
+                self.assertIn("--num_generations 16", result.stdout)
+                self.assertIn("--per_device_batch_size 1", result.stdout)
+                self.assertIn("--gradient_accumulation_steps 16", result.stdout)
+
+    def test_diprec_rl_branches_share_the_same_sft_parent(self):
+        script = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
+        self.assertIn("diprec_traj_rl|diprec_plan_rl)", script)
+        self.assertIn('--model "$DIPREC_SFT"', script)
+        self.assertIn('--item_meta "$ITEM_META"', script)
+        self.assertIn('"interest_strategy":sys.argv[7]', script)
+        self.assertIn('"time_decay":float(sys.argv[8])', script)
+        self.assertIn('diprec_interest_adapter.pt', script)
+
+    def test_both_diprec_rl_methods_use_corrected_trl_lifecycle(self):
+        for method, mode in (
+            ("diprec_traj_rl", "trajectory_grpo"),
+            ("diprec_plan_rl", "plan_grpo"),
+        ):
+            with self.subTest(method=method):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "scripts/run_experiment.sh",
+                        "--method",
+                        method,
+                        "--dataset",
+                        "Games",
+                        "--dry_run",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    f"scripts/train_diprec_grpo.sh --mode {mode}",
+                    result.stdout,
+                )
+                self.assertIn("--num_iterations 2", result.stdout)
+                self.assertIn("--beta 0.001", result.stdout)
+                self.assertIn("--interest_strategy frequency", result.stdout)
+                self.assertIn("--time_decay 0.1", result.stdout)
+
+    def test_diprec_generation_batch_defaults_to_effective_update_batch(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "diprec_plan_rl",
+                "--dataset",
+                "Games",
+                "--num_plans",
+                "4",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--num_plans 4", result.stdout)
+        self.assertIn("--gradient_accumulation_steps 8", result.stdout)
+        self.assertNotIn("--generation_batch_size", result.stdout)
+
+    def test_all_comparisons_forwards_diprec_ablation_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dataset_file = Path(directory) / "datasets.txt"
+            dataset_file.write_text("Games\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "scripts/run_all_comparisons.sh",
+                    "--dataset_file",
+                    str(dataset_file),
+                    "--interest_topk",
+                    "2",
+                    "--num_plans",
+                    "4",
+                    "--sid_beams",
+                    "6",
+                    "--conditioning",
+                    "history_visible",
+                    "--interest_parameterization",
+                    "disjoint_rows",
+                    "--interest_strategy",
+                    "time_decay",
+                    "--time_decay",
+                    "0.2",
+                    "--dry_run",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--num_plans 4", result.stdout)
+        self.assertIn("--sid_beams 6", result.stdout)
+        self.assertIn("--conditioning history_visible", result.stdout)
+        self.assertIn("--interest_parameterization disjoint_rows", result.stdout)
+        self.assertIn("--interest_strategy time_decay", result.stdout)
+        self.assertIn("--time_decay 0.2", result.stdout)
+
+    def test_explicit_rl_generation_batches_are_forwarded(self):
+        for method, flag, batch in (
+            ("direct_rl", "--baseline_rl_generation_batch_size", 32),
+            ("diprec_plan_rl", "--diprec_rl_generation_batch_size", 16),
+        ):
+            with self.subTest(method=method):
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "scripts/run_experiment.sh",
+                        "--method",
+                        method,
+                        "--dataset",
+                        "Games",
+                        flag,
+                        str(batch),
+                        "--dry_run",
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--generation_batch_size {batch}", result.stdout)
+
+    def test_explicit_generation_batch_is_deferred_to_trainer_validation(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "direct_rl",
+                "--dataset",
+                "Games",
+                "--baseline_rl_generation_batch_size",
+                "16",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--generation_batch_size 16", result.stdout)
+
+    def test_legacy_method_aliases_resolve_to_canonical_output_names(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "diprec_plan_grpo",
+                "--dataset",
+                "Games",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("scripts/train_diprec_grpo.sh --mode plan_grpo", result.stdout)
+        self.assertIn("/diprec_plan_rl/seed_42/final_checkpoint", result.stdout)
+        self.assertIn("scripts/eval_diprec.sh --method diprec_plan_rl", result.stdout)
 
 if __name__ == "__main__":
     unittest.main()
