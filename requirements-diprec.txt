@@ -6,7 +6,7 @@ numpy>=1.26,<2
 pandas>=2.0
 pyarrow>=21.0.0
 safetensors>=0.4.3
-# torch==2.6.0
+torch==2.6.0
 tqdm>=4.66.3
 transformers[hf_xet]==4.57.1
 trl==0.24.0
