@@ -123,11 +123,11 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --dataset Video_Games \
   --run_tag sft10e \
   --sft_micro_batch_size 8 \
-  --sft_gradient_accumulation_steps 4 \
-  2>&1 | tee minionerec_sft_sft10e.log
+  --sft_gradient_accumulation_steps 4
 ```
 
-SFT 结束后、启动 RL 前，请先检查：
+终端仍会持续显示 step 级 loss，方便实时观察；磁盘上的精简日志只会在每个
+epoch 完成时更新。SFT 结束后、启动 RL 前，请先检查：
 
 ```text
 output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/sft_training_metrics.json

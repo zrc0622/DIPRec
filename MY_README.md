@@ -124,11 +124,11 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --dataset Video_Games \
   --run_tag sft10e \
   --sft_micro_batch_size 8 \
-  --sft_gradient_accumulation_steps 4 \
-  2>&1 | tee minionerec_sft_sft10e.log
+  --sft_gradient_accumulation_steps 4
 ```
 
-After SFT completes, inspect these files before starting RL:
+The terminal continues to print step-level loss for live monitoring. Its concise on-disk
+log is updated once per completed epoch; inspect these files before starting RL:
 
 ```text
 output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/sft_training_metrics.json
