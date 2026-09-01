@@ -20,12 +20,17 @@ EVAL_CANDIDATE_BUDGET=80
 MAX_HISTORY_LEN=50
 MAX_SEQ_LEN=2048
 SEED=42
+RUN_TAG=""
 CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
-SFT_MICRO_BATCH_SIZE=2
-SFT_GRADIENT_ACCUMULATION_STEPS=16
+SFT_NUM_EPOCHS=10
+SFT_MICRO_BATCH_SIZE=4
+SFT_GRADIENT_ACCUMULATION_STEPS=8
+SFT_LEARNING_RATE=5e-5
+SFT_WEIGHT_DECAY=0.01
+SFT_WARMUP_RATIO=0.03
 BASELINE_RL_PER_DEVICE_BATCH_SIZE=1
 BASELINE_RL_GENERATION_BATCH_SIZE=""
 BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=16
@@ -59,12 +64,17 @@ while [[ $# -gt 0 ]]; do
     --max_history_len) MAX_HISTORY_LEN="$2"; shift 2 ;;
     --max_seq_len) MAX_SEQ_LEN="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
+    --run_tag) RUN_TAG="$2"; shift 2 ;;
     --conditioning) CONDITIONING="$2"; shift 2 ;;
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
     --sft_micro_batch_size) SFT_MICRO_BATCH_SIZE="$2"; shift 2 ;;
     --sft_gradient_accumulation_steps) SFT_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --sft_learning_rate) SFT_LEARNING_RATE="$2"; shift 2 ;;
+    --sft_weight_decay) SFT_WEIGHT_DECAY="$2"; shift 2 ;;
+    --sft_warmup_ratio) SFT_WARMUP_RATIO="$2"; shift 2 ;;
     --baseline_rl_per_device_batch_size) BASELINE_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_generation_batch_size) BASELINE_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_gradient_accumulation_steps) BASELINE_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -81,6 +91,10 @@ done
 
 : "${METHOD:?--method is required}"
 : "${DATASET:?--dataset is required}"
+if [[ -n "$RUN_TAG" && ! "$RUN_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "--run_tag must start with an alphanumeric character and contain only letters, digits, ., _, or -" >&2
+  exit 2
+fi
 
 case "$DATASET" in
   Games) DATASET="Video_Games" ;;
@@ -114,6 +128,7 @@ for value in "$NUM_PLANS" "$SID_BEAMS" "$EVAL_BEAMS" "$EVAL_CANDIDATE_BUDGET"; d
   fi
 done
 for value in \
+  "$SFT_NUM_EPOCHS" \
   "$SFT_MICRO_BATCH_SIZE" \
   "$SFT_GRADIENT_ACCUMULATION_STEPS" \
   "$BASELINE_RL_PER_DEVICE_BATCH_SIZE" \
@@ -154,8 +169,10 @@ fi
 DATA_DIR="data/processed/$DATASET/$DATA_VARIANT"
 MODEL_SLUG="${MODEL//\//_}"
 MODEL_SLUG="${MODEL_SLUG// /_}"
-RUN_DIR="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/seed_$SEED"
-MODEL_DIR="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/seed_$SEED"
+RUN_ID="seed_$SEED"
+if [[ -n "$RUN_TAG" ]]; then RUN_ID+="_$RUN_TAG"; fi
+RUN_DIR="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/$RUN_ID"
+MODEL_DIR="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/$RUN_ID"
 mkdir -p "$RUN_DIR" "$MODEL_DIR"
 
 if [[ -z "$SID_INDEX" ]]; then
@@ -220,9 +237,9 @@ if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
   fi
 fi
 
-DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/seed_$SEED/final_checkpoint"
-MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/seed_$SEED/final_checkpoint"
-DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/seed_$SEED/final_checkpoint"
+DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/$RUN_ID/final_checkpoint"
+MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/$RUN_ID/final_checkpoint"
+DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/$RUN_ID/final_checkpoint"
 
 checkpoint_ready() {
   local checkpoint="$1" expected_method="$2" expected_parent="$3" expected_item_meta="${4:-}"
@@ -236,6 +253,10 @@ checkpoint_ready() {
 
 run_sft() {
   local sft_method="$1" source_model="$2" destination="$3"
+  if [[ -e "$destination" && "$DRY_RUN" -eq 0 ]]; then
+    echo "Refusing to overwrite existing SFT checkpoint at $destination; choose a new --run_tag or relocate it first" >&2
+    exit 1
+  fi
   local cmd=(bash scripts/train_diprec_sft.sh
     --method "$sft_method"
     --model "$source_model"
@@ -250,8 +271,13 @@ run_sft() {
     --interest_parameterization "$INTEREST_PARAMETERIZATION"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"
+    --num_epochs "$SFT_NUM_EPOCHS"
     --micro_batch_size "$SFT_MICRO_BATCH_SIZE"
     --gradient_accumulation_steps "$SFT_GRADIENT_ACCUMULATION_STEPS"
+    --learning_rate "$SFT_LEARNING_RATE"
+    --weight_decay "$SFT_WEIGHT_DECAY"
+    --warmup_ratio "$SFT_WARMUP_RATIO"
+    --training_metrics_file "$(dirname "$destination")/sft_training_metrics.json"
     --seed "$SEED")
   if [[ "$sft_method" == "minionerec_sft" || "$sft_method" == "diprec_sft" ]]; then
     cmd+=(--item_meta "$ITEM_META")

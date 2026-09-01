@@ -136,6 +136,96 @@ class RunnerContractTest(unittest.TestCase):
                 self.assertIn("--per_device_batch_size 1", result.stdout)
                 self.assertIn("--gradient_accumulation_steps 16", result.stdout)
 
+    def test_sft_recipe_controls_and_metrics_file_are_forwarded(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "minionerec_sft",
+                "--dataset",
+                "Games",
+                "--sft_num_epochs",
+                "9",
+                "--sft_micro_batch_size",
+                "3",
+                "--sft_gradient_accumulation_steps",
+                "10",
+                "--sft_learning_rate",
+                "7e-5",
+                "--sft_weight_decay",
+                "0.02",
+                "--sft_warmup_ratio",
+                "0.04",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for value in (
+            "--num_epochs 9",
+            "--micro_batch_size 3",
+            "--gradient_accumulation_steps 10",
+            "--learning_rate 7e-5",
+            "--weight_decay 0.02",
+            "--warmup_ratio 0.04",
+            "--training_metrics_file output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42/sft_training_metrics.json",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value, result.stdout)
+
+    def test_run_tag_creates_an_isolated_checkpoint_and_metrics_path(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "minionerec_sft",
+                "--dataset",
+                "Games",
+                "--run_tag",
+                "sft10e",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("/minionerec_sft/seed_42_sft10e/final_checkpoint", result.stdout)
+        self.assertIn(
+            "/minionerec_sft/seed_42_sft10e/sft_training_metrics.json",
+            result.stdout,
+        )
+
+    def test_run_tag_keeps_rl_parent_checkpoint_in_the_same_lineage(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "minionerec_rl",
+                "--dataset",
+                "Games",
+                "--run_tag",
+                "sft10e",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "minionerec_sft/seed_42_sft10e/final_checkpoint",
+            result.stdout,
+        )
+
     def test_diprec_rl_branches_share_the_same_sft_parent(self):
         script = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
         self.assertIn("diprec_traj_rl|diprec_plan_rl)", script)

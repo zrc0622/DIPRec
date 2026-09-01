@@ -326,6 +326,17 @@ def _evaluate_loss(model: Any, loader: Any, accelerator: Any) -> float:
     return torch.cat(losses).float().mean().item()
 
 
+def _write_training_metrics(path: Path, payload: Mapping[str, Any]) -> None:
+    """Atomically persist SFT epoch summaries outside the checkpoint directory."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     method = canonical_sft_method(args.method)
@@ -465,24 +476,102 @@ def train(args: argparse.Namespace) -> None:
     model, optimizer, train_loader, valid_loader, scheduler = accelerator.prepare(
         model, optimizer, train_loader, valid_loader, scheduler
     )
+    metrics_path = (
+        Path(args.training_metrics_file)
+        if args.training_metrics_file
+        else Path(args.output_dir).parent / "sft_training_metrics.json"
+    )
+    training_metrics: dict[str, Any] = {
+        "status": "running",
+        "method": method,
+        "model": args.model,
+        "hyperparameters": {
+            "num_epochs": args.num_epochs,
+            "micro_batch_size": args.micro_batch_size,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "effective_batch_size_per_process": args.micro_batch_size
+            * args.gradient_accumulation_steps,
+            "world_size": accelerator.num_processes,
+            "effective_global_batch_size": args.micro_batch_size
+            * args.gradient_accumulation_steps
+            * accelerator.num_processes,
+            "learning_rate": args.learning_rate,
+            "weight_decay": args.weight_decay,
+            "warmup_ratio": args.warmup_ratio,
+            "max_seq_len": args.max_seq_len,
+        },
+        "epochs": [],
+    }
+    if accelerator.is_main_process:
+        _write_training_metrics(metrics_path, training_metrics)
+    accelerator.wait_for_everyone()
+    # Accelerate may shard the loader after preparation. The scheduler remains
+    # configured from the pre-prepare global data-loader length (and Accelerate
+    # adjusts its stepping under replicated DDP), while this value records the
+    # optimizer steps observed by each process.
+    optimizer_steps_per_epoch = math.ceil(
+        len(train_loader) / args.gradient_accumulation_steps
+    )
+    if accelerator.is_main_process:
+        print(
+            "sft_config "
+            f"epochs={args.num_epochs} micro_batch={args.micro_batch_size} "
+            f"accumulation={args.gradient_accumulation_steps} "
+            f"global_batch={args.micro_batch_size * args.gradient_accumulation_steps * accelerator.num_processes} "
+            f"learning_rate={args.learning_rate:g} warmup_steps={warmup_steps} "
+            f"scheduler_total_steps={update_steps} "
+            f"optimizer_steps_per_process={optimizer_steps_per_epoch * args.num_epochs}",
+            flush=True,
+        )
     model.train()
+    optimizer_steps = 0
     for epoch in range(args.num_epochs):
         running = 0.0
+        train_loss_sum = torch.zeros((), device=accelerator.device)
+        train_loss_count = 0
         for step, batch in enumerate(train_loader, 1):
             with accelerator.accumulate(model):
                 loss = model(**batch).loss
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    optimizer_steps += 1
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
             running += loss.detach().float().item()
+            train_loss_sum += loss.detach().float()
+            train_loss_count += 1
             if accelerator.is_main_process and step % args.log_every == 0:
                 print(f"epoch={epoch + 1} step={step} train_loss={running / step:.6f}")
         validation_loss = _evaluate_loss(model, valid_loader, accelerator)
+        gathered_train_loss_sum = accelerator.gather(train_loss_sum.reshape(1)).float().sum()
+        gathered_train_loss_count = accelerator.gather(
+            torch.tensor([train_loss_count], device=accelerator.device)
+        ).sum()
+        train_loss = (
+            (gathered_train_loss_sum / gathered_train_loss_count).item()
+            if gathered_train_loss_count.item()
+            else float("nan")
+        )
+        epoch_summary = {
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "validation_loss": validation_loss,
+            "micro_batches_per_process": len(train_loader),
+            "optimizer_steps_completed": optimizer_steps,
+        }
         if accelerator.is_main_process:
-            print(f"epoch={epoch + 1} validation_loss={validation_loss:.6f}")
+            training_metrics["epochs"].append(epoch_summary)
+            training_metrics["completed_epochs"] = epoch + 1
+            training_metrics["status"] = "complete" if epoch + 1 == args.num_epochs else "running"
+            _write_training_metrics(metrics_path, training_metrics)
+            print(
+                f"epoch={epoch + 1} train_loss={train_loss:.6f} "
+                f"validation_loss={validation_loss:.6f} optimizer_steps={optimizer_steps}",
+                flush=True,
+            )
+        accelerator.wait_for_everyone()
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
@@ -520,14 +609,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time_decay", type=float, default=0.1)
     parser.add_argument("--interest_parameterization", choices=("independent_head", "disjoint_rows"), default="independent_head")
     parser.add_argument("--conditioning", choices=("history_visible", "interest_bottleneck"), default="interest_bottleneck")
-    parser.add_argument("--num_epochs", type=int, default=3)
-    parser.add_argument("--micro_batch_size", type=int, default=2)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--micro_batch_size", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--warmup_ratio", type=float, default=0.03)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument(
+        "--training_metrics_file",
+        help="JSON file updated after every completed SFT epoch (defaults beside output_dir)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry_run", action="store_true")
     return parser

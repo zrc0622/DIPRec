@@ -66,8 +66,12 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "interest_parameterization": "INTEREST_PARAMETERIZATION",
             "conditioning": "CONDITIONING",
             "num_plans": "NUM_PLANS",
+            "sft_num_epochs": "SFT_NUM_EPOCHS",
             "sft_micro_batch_size": "SFT_MICRO_BATCH_SIZE",
             "sft_gradient_accumulation_steps": "SFT_GRADIENT_ACCUMULATION_STEPS",
+            "sft_learning_rate": "SFT_LEARNING_RATE",
+            "sft_weight_decay": "SFT_WEIGHT_DECAY",
+            "sft_warmup_ratio": "SFT_WARMUP_RATIO",
             "baseline_rl_per_device_batch_size": "BASELINE_RL_PER_DEVICE_BATCH_SIZE",
             "baseline_rl_gradient_accumulation_steps": "BASELINE_RL_GRADIENT_ACCUMULATION_STEPS",
             "diprec_rl_per_device_batch_size": "DIPREC_RL_PER_DEVICE_BATCH_SIZE",
@@ -123,6 +127,15 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             sft["gradient_accumulation_steps"],
             self.config["sft_gradient_accumulation_steps"],
         )
+        for parser_key, config_key in (
+            ("num_epochs", "sft_num_epochs"),
+            ("learning_rate", "sft_learning_rate"),
+            ("weight_decay", "sft_weight_decay"),
+            ("warmup_ratio", "sft_warmup_ratio"),
+        ):
+            with self.subTest(key=parser_key):
+                self.assertEqual(sft[parser_key], self.config[config_key])
+        self.assertIsNone(sft["training_metrics_file"])
         baseline_mapping = {
             "num_generations": "baseline_rl_num_generations",
             "per_device_batch_size": "baseline_rl_per_device_batch_size",

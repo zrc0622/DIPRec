@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 MODEL="Qwen/Qwen3-0.6B"
 DATASET_FILE="configs/selected_long_history_datasets.txt"
 SEEDS="42"
+RUN_TAG=""
 MAX_HISTORY_LEN=50
 MAX_SEQ_LEN=2048
 EVAL_BEAMS=10
@@ -20,8 +21,12 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
-SFT_MICRO_BATCH_SIZE=2
-SFT_GRADIENT_ACCUMULATION_STEPS=16
+SFT_NUM_EPOCHS=10
+SFT_MICRO_BATCH_SIZE=4
+SFT_GRADIENT_ACCUMULATION_STEPS=8
+SFT_LEARNING_RATE=5e-5
+SFT_WEIGHT_DECAY=0.01
+SFT_WARMUP_RATIO=0.03
 BASELINE_RL_PER_DEVICE_BATCH_SIZE=1
 BASELINE_RL_GENERATION_BATCH_SIZE=""
 BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=16
@@ -37,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --dataset_file) DATASET_FILE="$2"; shift 2 ;;
     --seeds) SEEDS="$2"; shift 2 ;;
+    --run_tag) RUN_TAG="$2"; shift 2 ;;
     --max_history_len) MAX_HISTORY_LEN="$2"; shift 2 ;;
     --max_seq_len) MAX_SEQ_LEN="$2"; shift 2 ;;
     --eval_beams) EVAL_BEAMS="$2"; shift 2 ;;
@@ -50,8 +56,12 @@ while [[ $# -gt 0 ]]; do
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
     --sft_micro_batch_size) SFT_MICRO_BATCH_SIZE="$2"; shift 2 ;;
     --sft_gradient_accumulation_steps) SFT_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --sft_learning_rate) SFT_LEARNING_RATE="$2"; shift 2 ;;
+    --sft_weight_decay) SFT_WEIGHT_DECAY="$2"; shift 2 ;;
+    --sft_warmup_ratio) SFT_WARMUP_RATIO="$2"; shift 2 ;;
     --baseline_rl_per_device_batch_size) BASELINE_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_generation_batch_size) BASELINE_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_gradient_accumulation_steps) BASELINE_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -96,8 +106,13 @@ for dataset in "${DATASETS[@]}"; do
         --eval_candidate_budget "$EVAL_CANDIDATE_BUDGET"
         --max_history_len "$MAX_HISTORY_LEN"
         --max_seq_len "$MAX_SEQ_LEN"
+        --run_tag "$RUN_TAG"
+        --sft_num_epochs "$SFT_NUM_EPOCHS"
         --sft_micro_batch_size "$SFT_MICRO_BATCH_SIZE"
         --sft_gradient_accumulation_steps "$SFT_GRADIENT_ACCUMULATION_STEPS"
+        --sft_learning_rate "$SFT_LEARNING_RATE"
+        --sft_weight_decay "$SFT_WEIGHT_DECAY"
+        --sft_warmup_ratio "$SFT_WARMUP_RATIO"
         --baseline_rl_per_device_batch_size "$BASELINE_RL_PER_DEVICE_BATCH_SIZE"
         --baseline_rl_gradient_accumulation_steps "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS"
         --diprec_rl_per_device_batch_size "$DIPREC_RL_PER_DEVICE_BATCH_SIZE"
