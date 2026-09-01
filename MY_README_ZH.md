@@ -23,7 +23,7 @@ python -c "import torch, trl; print('torch', torch.__version__, 'CUDA', torch.ve
 
 RL 训练沿用 MiniOneRec 的 constrained beam sampling（`do_sample=True`）。七组评测的 SID 排序阶段统一使用确定性 constrained beam（`do_sample=False`）和 80 个原始 SID 候选预算；候选按 SID 去重后截取**最多** Top-10，不用重复项补满。DIPRec 将 80 个候选分配给各 plan（默认 `8 × 10`），再按 `log p(plan) + log p(SID | plan)` 联合排序；兴趣 plan 仍按固定 seed 采样。
 
-单张 40 GB GPU 的默认 SFT 配方为：10 epoch、micro-batch 4、累积 8（有效 batch 32）、学习率 `5e-5`、3% cosine warmup。由于本仓库的 prompt/数据混合与上游不同，它有意比 MiniOneRec 上游 `3e-4` 更保守；每完成一个 epoch，指标都会写到 checkpoint 同级的 `sft_training_metrics.json`。Direct/MiniOneRec-RL 仍使用 micro-batch 1/累积 16，DIPRec-RL 使用 micro-batch 1/累积 8。两个 RL trainer 都会自动令全局 generation batch 等于 `per_device_batch_size × world_size × gradient_accumulation_steps`（单卡分别为 16 和 8）。它们不是硬件最优值；先执行 `--dry_run`，再按远端 GPU 调整对应训练脚本参数。两个 DIPRec-RL 方法都使用冻结的 DIPRec-SFT reference（`beta=1e-3`），缓存 old-policy log-prob，并将每批 rollout 复用两次（`num_iterations=2`），因此第二次更新开始 PPO clipping 会实际生效。`diprec_traj_rl` 将完整轨迹 advantage 同时用于两阶段；`diprec_plan_rl` 保留 plan 跨 G、SID 在 B 内的两级 advantage。
+单张 46 GB GPU 的推荐 MiniOneRec-SFT 配方为：最多 6 epoch、micro-batch 8、累积 4（有效 batch 32）、学习率 `1e-4`、3% cosine warmup。在 Video Games 的三组实验中，`1e-4` 的 validation/test NDCG 优于 `5e-5` 和 `2e-4`；下方命令会显式传入这些参数。每完成一个 epoch，指标都会写入 `outputs/.../sft_training_metrics.json`；最低 validation loss 的权重保存到 `output_dir/.../best_checkpoint`，最后一轮仍保存在 `output_dir/.../final_checkpoint`。SFT 评测和后续 RL 会自动使用 `best_checkpoint`。Direct/MiniOneRec-RL 仍使用 micro-batch 1/累积 16，DIPRec-RL 使用 micro-batch 1/累积 8。两个 RL trainer 都会自动令全局 generation batch 等于 `per_device_batch_size × world_size × gradient_accumulation_steps`（单卡分别为 16 和 8）。它们不是硬件最优值；先执行 `--dry_run`，再按远端 GPU 调整对应训练脚本参数。两个 DIPRec-RL 方法都使用冻结的 DIPRec-SFT reference（`beta=1e-3`），缓存 old-policy log-prob，并将每批 rollout 复用两次（`num_iterations=2`），因此第二次更新开始 PPO clipping 会实际生效。`diprec_traj_rl` 将完整轨迹 advantage 同时用于两阶段；`diprec_plan_rl` 保留 plan 跨 G、SID 在 B 内的两级 advantage。
 
 ## 2. 放置官方数据
 
@@ -114,25 +114,31 @@ Accelerate 配置必须使用普通 multi-GPU DDP。自定义集中式 rollout �
 
 ### 1. SFT
 
-以下命令是适合 46 GB 显存的推荐配置：micro-batch 为 8、梯度累积为 4，
-有效 batch 仍为 32，但每一步 GPU 计算量更大。
+以下命令采用 Video Games 三组实验中的推荐配置：最多 6 epoch、学习率 `1e-4`、
+micro-batch 8、梯度累积 4（有效 batch 32）。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_sft \
   --dataset Video_Games \
-  --run_tag sft10e \
+  --run_tag sft6e_lr1e-4_best \
+  --sft_num_epochs 6 \
   --sft_micro_batch_size 8 \
-  --sft_gradient_accumulation_steps 4
+  --sft_gradient_accumulation_steps 4 \
+  --sft_learning_rate 1e-4
 ```
 
 终端仍会持续显示 step 级 loss，方便实时观察；磁盘上的精简日志只会在每个
 epoch 完成时更新。SFT 结束后、启动 RL 前，请先检查：
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/sft_training_metrics.json
-outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/valid_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/sft_training_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/valid_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/metrics.json
 ```
+
+服务器跑完后，只需下载上面的整个 `outputs/.../seed_42_sft6e_lr1e-4_best/`
+目录供调试；大模型权重单独保存在 `output_dir/.../`，通常留在服务器即可。
 
 ### 2. RL
 
@@ -140,14 +146,14 @@ outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/val
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Video_Games \
-  --run_tag sft10e \
-  2>&1 | tee minionerec_rl_sft10e.log
+  --run_tag sft6e_lr1e-4_best \
+  2>&1 | tee minionerec_rl_sft6e_lr1e-4_best.log
 ```
 
 此 `run_tag` 下，RL 会从以下 SFT checkpoint 初始化：
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/final_checkpoint
+output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
 可用方法：
@@ -184,7 +190,7 @@ bash scripts/run_all_comparisons.sh \
   --seeds 42
 ```
 
-常用参数：`--max_history_len 10|20|50`、`--model Qwen/Qwen3-1.7B`、`--conditioning history_visible|interest_bottleneck`。用 `--run_tag sft10e` 可以让重训与旧 checkpoint 隔离；SFT 不会覆盖已有 checkpoint。SFT 参数包括 `--sft_num_epochs`、`--sft_micro_batch_size`、`--sft_gradient_accumulation_steps`、`--sft_learning_rate`、`--sft_weight_decay`、`--sft_warmup_ratio`。
+常用参数：`--max_history_len 10|20|50`、`--model Qwen/Qwen3-1.7B`、`--conditioning history_visible|interest_bottleneck`。用 `--run_tag sft6e_lr1e-4_best` 可以让重训与旧 checkpoint 隔离；SFT 不会覆盖已有的 `best_checkpoint` 或 `final_checkpoint`。SFT 参数包括 `--sft_num_epochs`、`--sft_micro_batch_size`、`--sft_gradient_accumulation_steps`、`--sft_learning_rate`、`--sft_weight_decay`、`--sft_warmup_ratio`。
 
 RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，以及对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
 

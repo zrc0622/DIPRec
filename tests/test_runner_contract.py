@@ -172,7 +172,7 @@ class RunnerContractTest(unittest.TestCase):
             "--learning_rate 7e-5",
             "--weight_decay 0.02",
             "--warmup_ratio 0.04",
-            "--training_metrics_file output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42/sft_training_metrics.json",
+            "--training_metrics_file outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42/sft_training_metrics.json",
         ):
             with self.subTest(value=value):
                 self.assertIn(value, result.stdout)
@@ -187,7 +187,7 @@ class RunnerContractTest(unittest.TestCase):
                 "--dataset",
                 "Games",
                 "--run_tag",
-                "sft10e",
+                "sft6e",
                 "--dry_run",
             ],
             cwd=ROOT,
@@ -196,9 +196,14 @@ class RunnerContractTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("/minionerec_sft/seed_42_sft10e/final_checkpoint", result.stdout)
+        self.assertIn("output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/final_checkpoint", result.stdout)
+        self.assertIn("output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/best_checkpoint", result.stdout)
         self.assertIn(
-            "/minionerec_sft/seed_42_sft10e/sft_training_metrics.json",
+            "outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/sft_training_metrics.json",
+            result.stdout,
+        )
+        self.assertNotIn(
+            "output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/sft_training_metrics.json",
             result.stdout,
         )
 
@@ -212,7 +217,7 @@ class RunnerContractTest(unittest.TestCase):
                 "--dataset",
                 "Games",
                 "--run_tag",
-                "sft10e",
+                "sft6e",
                 "--dry_run",
             ],
             cwd=ROOT,
@@ -222,7 +227,15 @@ class RunnerContractTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(
-            "minionerec_sft/seed_42_sft10e/final_checkpoint",
+            "minionerec_sft/seed_42_sft6e/best_checkpoint",
+            result.stdout,
+        )
+        self.assertIn(
+            "--training_metrics_file outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/sft_training_metrics.json",
+            result.stdout,
+        )
+        self.assertIn(
+            "--output_dir output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_sft6e/final_checkpoint",
             result.stdout,
         )
 
@@ -234,6 +247,7 @@ class RunnerContractTest(unittest.TestCase):
         self.assertIn('"interest_strategy":sys.argv[7]', script)
         self.assertIn('"time_decay":float(sys.argv[8])', script)
         self.assertIn('diprec_interest_adapter.pt', script)
+        self.assertIn('training.get("checkpoint_role")=="best_validation"', script)
 
     def test_both_diprec_rl_methods_use_corrected_trl_lifecycle(self):
         for method, mode in (

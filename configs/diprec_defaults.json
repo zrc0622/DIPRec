@@ -7,7 +7,7 @@
   "interest_parameterization": "independent_head",
   "conditioning": "interest_bottleneck",
   "num_plans": 8,
-  "sft_num_epochs": 10,
+  "sft_num_epochs": 6,
   "sft_micro_batch_size": 4,
   "sft_gradient_accumulation_steps": 8,
   "sft_learning_rate": 5e-05,

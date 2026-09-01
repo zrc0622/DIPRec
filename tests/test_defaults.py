@@ -136,6 +136,7 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             with self.subTest(key=parser_key):
                 self.assertEqual(sft[parser_key], self.config[config_key])
         self.assertIsNone(sft["training_metrics_file"])
+        self.assertIsNone(sft["best_output_dir"])
         baseline_mapping = {
             "num_generations": "baseline_rl_num_generations",
             "per_device_batch_size": "baseline_rl_per_device_batch_size",

@@ -337,6 +337,68 @@ def _write_training_metrics(path: Path, payload: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _training_config(
+    args: argparse.Namespace,
+    method: str,
+    manifest: Mapping[str, Any],
+    train_stats: Mapping[str, Any],
+    valid_stats: Mapping[str, Any],
+    *,
+    checkpoint_role: str,
+    selected_epoch: int,
+    selected_validation_loss: float,
+) -> dict[str, Any]:
+    return vars(args) | {
+        "method": method,
+        "item_meta_sha256": sha256_file(args.item_meta) if args.item_meta else None,
+        "train_history": train_stats,
+        "valid_history": valid_stats,
+        "data_manifest": processed_data_fingerprint(manifest),
+        "checkpoint_role": checkpoint_role,
+        "selected_epoch": selected_epoch,
+        "selected_validation_loss": selected_validation_loss,
+    }
+
+
+def _save_sft_checkpoint(
+    model: Any,
+    tokenizer: Any,
+    router: Any,
+    accelerator: Any,
+    destination: Path,
+    args: argparse.Namespace,
+    method: str,
+    manifest: Mapping[str, Any],
+    train_stats: Mapping[str, Any],
+    valid_stats: Mapping[str, Any],
+    *,
+    checkpoint_role: str,
+    selected_epoch: int,
+    selected_validation_loss: float,
+) -> None:
+    unwrapped = accelerator.unwrap_model(model)
+    save_runtime(
+        unwrapped,
+        tokenizer,
+        router,
+        destination,
+        args.interest_parameterization,
+    )
+    config = _training_config(
+        args,
+        method,
+        manifest,
+        train_stats,
+        valid_stats,
+        checkpoint_role=checkpoint_role,
+        selected_epoch=selected_epoch,
+        selected_validation_loss=selected_validation_loss,
+    )
+    (destination / "training_config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     method = canonical_sft_method(args.method)
@@ -481,6 +543,11 @@ def train(args: argparse.Namespace) -> None:
         if args.training_metrics_file
         else Path(args.output_dir).parent / "sft_training_metrics.json"
     )
+    best_output_dir = (
+        Path(args.best_output_dir)
+        if args.best_output_dir
+        else Path(args.output_dir).with_name("best_checkpoint")
+    )
     training_metrics: dict[str, Any] = {
         "status": "running",
         "method": method,
@@ -500,6 +567,10 @@ def train(args: argparse.Namespace) -> None:
             "warmup_ratio": args.warmup_ratio,
             "max_seq_len": args.max_seq_len,
         },
+        "best_checkpoint": str(best_output_dir),
+        "final_checkpoint": str(args.output_dir),
+        "best_epoch": None,
+        "best_validation_loss": None,
         "epochs": [],
     }
     if accelerator.is_main_process:
@@ -525,6 +596,9 @@ def train(args: argparse.Namespace) -> None:
         )
     model.train()
     optimizer_steps = 0
+    best_validation_loss = math.inf
+    best_epoch: int | None = None
+    final_validation_loss = float("nan")
     for epoch in range(args.num_epochs):
         running = 0.0
         train_loss_sum = torch.zeros((), device=accelerator.device)
@@ -545,6 +619,7 @@ def train(args: argparse.Namespace) -> None:
             if accelerator.is_main_process and step % args.log_every == 0:
                 print(f"epoch={epoch + 1} step={step} train_loss={running / step:.6f}")
         validation_loss = _evaluate_loss(model, valid_loader, accelerator)
+        final_validation_loss = validation_loss
         gathered_train_loss_sum = accelerator.gather(train_loss_sum.reshape(1)).float().sum()
         gathered_train_loss_count = accelerator.gather(
             torch.tensor([train_loss_count], device=accelerator.device)
@@ -565,26 +640,52 @@ def train(args: argparse.Namespace) -> None:
             training_metrics["epochs"].append(epoch_summary)
             training_metrics["completed_epochs"] = epoch + 1
             training_metrics["status"] = "complete" if epoch + 1 == args.num_epochs else "running"
+            if math.isfinite(validation_loss) and validation_loss < best_validation_loss:
+                best_validation_loss = validation_loss
+                best_epoch = epoch + 1
+                training_metrics["best_epoch"] = best_epoch
+                training_metrics["best_validation_loss"] = best_validation_loss
+                _save_sft_checkpoint(
+                    model,
+                    tokenizer,
+                    router,
+                    accelerator,
+                    best_output_dir,
+                    args,
+                    method,
+                    manifest,
+                    train_stats,
+                    valid_stats,
+                    checkpoint_role="best_validation",
+                    selected_epoch=best_epoch,
+                    selected_validation_loss=best_validation_loss,
+                )
             _write_training_metrics(metrics_path, training_metrics)
             print(
                 f"epoch={epoch + 1} train_loss={train_loss:.6f} "
-                f"validation_loss={validation_loss:.6f} optimizer_steps={optimizer_steps}",
+                f"validation_loss={validation_loss:.6f} optimizer_steps={optimizer_steps} "
+                f"best_epoch={best_epoch} best_validation_loss={best_validation_loss:.6f}",
                 flush=True,
             )
         accelerator.wait_for_everyone()
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unwrapped = accelerator.unwrap_model(model)
-        save_runtime(unwrapped, tokenizer, router, args.output_dir, args.interest_parameterization)
-        training_config = vars(args) | {
-            "method": method,
-            "item_meta_sha256": sha256_file(args.item_meta) if args.item_meta else None,
-            "train_history": train_stats,
-            "valid_history": valid_stats,
-            "data_manifest": processed_data_fingerprint(manifest),
-        }
-        Path(args.output_dir, "training_config.json").write_text(
-            json.dumps(training_config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        if best_epoch is None:
+            raise RuntimeError("SFT validation produced no finite loss; no best checkpoint was saved")
+        _save_sft_checkpoint(
+            model,
+            tokenizer,
+            router,
+            accelerator,
+            Path(args.output_dir),
+            args,
+            method,
+            manifest,
+            train_stats,
+            valid_stats,
+            checkpoint_role="final",
+            selected_epoch=args.num_epochs,
+            selected_validation_loss=final_validation_loss,
         )
     accelerator.wait_for_everyone()
 
@@ -609,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time_decay", type=float, default=0.1)
     parser.add_argument("--interest_parameterization", choices=("independent_head", "disjoint_rows"), default="independent_head")
     parser.add_argument("--conditioning", choices=("history_visible", "interest_bottleneck"), default="interest_bottleneck")
-    parser.add_argument("--num_epochs", type=int, default=10)
+    parser.add_argument("--num_epochs", type=int, default=6)
     parser.add_argument("--micro_batch_size", type=int, default=4)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
@@ -619,7 +720,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log_every", type=int, default=10)
     parser.add_argument(
         "--training_metrics_file",
-        help="JSON file updated after every completed SFT epoch (defaults beside output_dir)",
+        help="JSON file updated after every completed SFT epoch (runner stores this under outputs/)",
+    )
+    parser.add_argument(
+        "--best_output_dir",
+        help="Checkpoint updated whenever validation loss improves (defaults beside output_dir)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry_run", action="store_true")

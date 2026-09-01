@@ -23,7 +23,7 @@ MiniOneRec here is a comparable shared-contract reproduction, not a line-for-lin
 
 RL training uses MiniOneRec's constrained beam-sampling behavior (`do_sample=True`). The SID-ranking stage of all seven evaluations uses deterministic constrained beams (`do_sample=False`) and the same budget of 80 raw SID candidates. Candidates are ranked, deduplicated by SID, and truncated to **at most** Top-10; no duplicate is inserted to fill a short list. DIPRec divides the 80 candidates across plans (default `8 × 10`) and ranks trajectories jointly by `log p(plan) + log p(SID | plan)`. Its interest plans remain sampled under the fixed seed.
 
-The default single-40-GB-GPU SFT recipe is 10 epochs, micro-batch 4, accumulation 8 (effective batch 32), learning rate `5e-5`, and 3% cosine warmup. It is deliberately more conservative than MiniOneRec's upstream `3e-4` recipe because this repository uses a different prompt/data mixture. Each completed epoch is persisted beside the checkpoint as `sft_training_metrics.json`. Direct/MiniOneRec-RL still uses micro-batch 1/accumulation 16, and DIPRec-RL uses micro-batch 1/accumulation 8. Both RL trainers automatically set the global generation batch to `per_device_batch_size × world_size × gradient_accumulation_steps` (16 and 8 respectively on one GPU). They are not hardware-optimal; run `--dry_run` first and tune the low-level trainer flags for the remote GPUs. Both DIPRec-RL methods now use a frozen DIPRec-SFT reference (`beta=1e-3`), cache old-policy log-probabilities, and reuse each rollout twice (`num_iterations=2`), so PPO clipping becomes active after the first update. `diprec_traj_rl` applies each trajectory advantage to both stages; `diprec_plan_rl` keeps plan-across-G and SID-within-B advantages separate.
+The recommended single-46-GB-GPU MiniOneRec-SFT recipe uses at most 6 epochs, micro-batch 8, accumulation 4 (effective batch 32), learning rate `1e-4`, and 3% cosine warmup. In the Video Games sweep, `1e-4` outperformed `5e-5` and `2e-4` on validation/test NDCG. Each completed epoch is persisted to `outputs/.../sft_training_metrics.json`; the lowest-validation-loss weights are saved to `output_dir/.../best_checkpoint`, while the last epoch remains in `output_dir/.../final_checkpoint`. SFT evaluation and downstream RL automatically use `best_checkpoint`. Direct/MiniOneRec-RL still uses micro-batch 1/accumulation 16, and DIPRec-RL uses micro-batch 1/accumulation 8. Both RL trainers automatically set the global generation batch to `per_device_batch_size × world_size × gradient_accumulation_steps` (16 and 8 respectively on one GPU). They are not hardware-optimal; run `--dry_run` first and tune the low-level trainer flags for the remote GPUs. Both DIPRec-RL methods now use a frozen DIPRec-SFT reference (`beta=1e-3`), cache old-policy log-probabilities, and reuse each rollout twice (`num_iterations=2`), so PPO clipping becomes active after the first update. `diprec_traj_rl` applies each trajectory advantage to both stages; `diprec_plan_rl` keeps plan-across-G and SID-within-B advantages separate.
 
 ## 2. Place the official data
 
@@ -114,26 +114,32 @@ Run the single-GPU MiniOneRec workflow in this order. Use the same `--run_tag` i
 
 ### 1. SFT
 
-The command below is the recommended 46-GB-GPU configuration: micro-batch 8 and
-gradient accumulation 4, retaining an effective batch size of 32 while increasing
-per-step GPU work.
+The command below uses the recommended configuration from the Video Games sweep: at most 6 epochs,
+learning rate `1e-4`, micro-batch 8, and accumulation 4 (effective batch 32).
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_sft \
   --dataset Video_Games \
-  --run_tag sft10e \
+  --run_tag sft6e_lr1e-4_best \
+  --sft_num_epochs 6 \
   --sft_micro_batch_size 8 \
-  --sft_gradient_accumulation_steps 4
+  --sft_gradient_accumulation_steps 4 \
+  --sft_learning_rate 1e-4
 ```
 
 The terminal continues to print step-level loss for live monitoring. Its concise on-disk
 log is updated once per completed epoch; inspect these files before starting RL:
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/sft_training_metrics.json
-outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/valid_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/sft_training_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/valid_metrics.json
+outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/metrics.json
 ```
+
+After the server run, download only the complete
+`outputs/.../seed_42_sft6e_lr1e-4_best/` directory for debugging. Large model
+weights live separately under `output_dir/.../` and normally stay on the server.
 
 ### 2. RL
 
@@ -141,14 +147,14 @@ outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/val
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Video_Games \
-  --run_tag sft10e \
-  2>&1 | tee minionerec_rl_sft10e.log
+  --run_tag sft6e_lr1e-4_best \
+  2>&1 | tee minionerec_rl_sft6e_lr1e-4_best.log
 ```
 
 With this tag, RL initializes from:
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft10e/final_checkpoint
+output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
 Supported methods:
@@ -185,7 +191,7 @@ bash scripts/run_all_comparisons.sh \
   --seeds 42
 ```
 
-Common options: `--max_history_len 10|20|50`, `--model Qwen/Qwen3-1.7B`, and `--conditioning history_visible|interest_bottleneck`. Use `--run_tag sft10e` to keep a retrain separate from an existing checkpoint; SFT will refuse to overwrite a checkpoint. SFT controls are `--sft_num_epochs`, `--sft_micro_batch_size`, `--sft_gradient_accumulation_steps`, `--sft_learning_rate`, `--sft_weight_decay`, and `--sft_warmup_ratio`.
+Common options: `--max_history_len 10|20|50`, `--model Qwen/Qwen3-1.7B`, and `--conditioning history_visible|interest_bottleneck`. Use `--run_tag sft6e_lr1e-4_best` to keep a retrain separate from existing checkpoints; SFT refuses to overwrite either `best_checkpoint` or `final_checkpoint`. SFT controls are `--sft_num_epochs`, `--sft_micro_batch_size`, `--sft_gradient_accumulation_steps`, `--sft_learning_rate`, `--sft_weight_decay`, and `--sft_warmup_ratio`.
 
 RL batch controls: `--baseline_rl_per_device_batch_size`, `--baseline_rl_generation_batch_size`, `--baseline_rl_gradient_accumulation_steps`, plus the analogous `--diprec_rl_*` options. Leave generation batch unset to derive it safely. If set explicitly, it must contain complete `num_generations`/`num_plans` groups and equal the global effective update batch. TRL consequently derives `steps_per_generation = gradient_accumulation_steps`. Internally, its sampler uses `repeat_count = num_iterations × steps_per_generation`: the `steps_per_generation` factor feeds all micro-step slices, while `num_iterations` determines how many optimizer updates reuse the rollout. Keep DIPRec `num_iterations >= 2`, so the same rollout drives two optimizer updates and PPO clipping is active on the reused update.
 

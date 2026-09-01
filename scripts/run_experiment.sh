@@ -25,7 +25,7 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
-SFT_NUM_EPOCHS=10
+SFT_NUM_EPOCHS=6
 SFT_MICRO_BATCH_SIZE=4
 SFT_GRADIENT_ACCUMULATION_STEPS=8
 SFT_LEARNING_RATE=5e-5
@@ -237,9 +237,9 @@ if [[ ! -f "$DATA_DIR/manifest.json" ]]; then
   fi
 fi
 
-DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/$RUN_ID/final_checkpoint"
-MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/$RUN_ID/final_checkpoint"
-DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/$RUN_ID/final_checkpoint"
+DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/$RUN_ID/best_checkpoint"
+MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/$RUN_ID/best_checkpoint"
+DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/$RUN_ID/best_checkpoint"
 
 checkpoint_ready() {
   local checkpoint="$1" expected_method="$2" expected_parent="$3" expected_item_meta="${4:-}"
@@ -248,13 +248,16 @@ checkpoint_ready() {
   if [[ "$expected_method" == "diprec_sft" && "$INTEREST_PARAMETERIZATION" == "independent_head" ]]; then
     [[ -f "$checkpoint/diprec_adapter_config.json" && -f "$checkpoint/diprec_interest_adapter.pt" ]] || return 1
   fi
-  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10]}) if sys.argv[3]=="diprec_sft" else None; config_ok=all(training.get(k)==v for k,v in expected.items()); ok=training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION"
+  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10]}) if sys.argv[3]=="diprec_sft" else None; config_ok=all(training.get(k)==v for k,v in expected.items()); ok=training.get("checkpoint_role")=="best_validation" and training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION"
 }
 
 run_sft() {
   local sft_method="$1" source_model="$2" destination="$3"
-  if [[ -e "$destination" && "$DRY_RUN" -eq 0 ]]; then
-    echo "Refusing to overwrite existing SFT checkpoint at $destination; choose a new --run_tag or relocate it first" >&2
+  local best_destination="$(dirname "$destination")/best_checkpoint"
+  local sft_debug_dir="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$sft_method/$RUN_ID"
+  mkdir -p "$sft_debug_dir"
+  if [[ "$DRY_RUN" -eq 0 && ( -e "$destination" || -e "$best_destination" ) ]]; then
+    echo "Refusing to overwrite existing SFT checkpoints under $(dirname "$destination"); choose a new --run_tag or relocate them first" >&2
     exit 1
   fi
   local cmd=(bash scripts/train_diprec_sft.sh
@@ -277,7 +280,8 @@ run_sft() {
     --learning_rate "$SFT_LEARNING_RATE"
     --weight_decay "$SFT_WEIGHT_DECAY"
     --warmup_ratio "$SFT_WARMUP_RATIO"
-    --training_metrics_file "$(dirname "$destination")/sft_training_metrics.json"
+    --training_metrics_file "$sft_debug_dir/sft_training_metrics.json"
+    --best_output_dir "$best_destination"
     --seed "$SEED")
   if [[ "$sft_method" == "minionerec_sft" || "$sft_method" == "diprec_sft" ]]; then
     cmd+=(--item_meta "$ITEM_META")
@@ -292,15 +296,16 @@ run_sft() {
 
 ensure_sft() {
   local sft_method="$1" source_model="$2" destination="$3" expected_item_meta="${4:-}"
+  local final_destination="$(dirname "$destination")/final_checkpoint"
   if checkpoint_ready "$destination" "$sft_method" "$source_model" "$expected_item_meta"; then
     echo "Using existing validated $sft_method checkpoint: $destination"
     return
   fi
-  if [[ -e "$destination" && "$DRY_RUN" -eq 0 ]]; then
-    echo "Incomplete or incompatible $sft_method checkpoint at $destination; remove or relocate it before retraining" >&2
+  if [[ "$DRY_RUN" -eq 0 && ( -e "$destination" || -e "$final_destination" ) ]]; then
+    echo "Incomplete, incompatible, or legacy $sft_method checkpoints under $(dirname "$destination"); choose a new --run_tag or relocate them before retraining" >&2
     exit 1
   fi
-  run_sft "$sft_method" "$source_model" "$destination"
+  run_sft "$sft_method" "$source_model" "$final_destination"
 }
 
 run_baseline_rl() {
@@ -336,7 +341,7 @@ TRAINED_MODEL=""
 case "$METHOD" in
   direct_sft)
     run_sft direct_sft "$MODEL" "$MODEL_DIR/final_checkpoint"
-    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/best_checkpoint"
     ;;
   direct_rl)
     ensure_sft direct_sft "$MODEL" "$DIRECT_SFT"
@@ -345,7 +350,7 @@ case "$METHOD" in
     ;;
   minionerec_sft)
     run_sft minionerec_sft "$MODEL" "$MODEL_DIR/final_checkpoint"
-    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/best_checkpoint"
     ;;
   minionerec_rl)
     ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
@@ -355,7 +360,7 @@ case "$METHOD" in
   diprec_sft)
     ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
     run_sft diprec_sft "$MINIONEREC_SFT" "$MODEL_DIR/final_checkpoint"
-    TRAINED_MODEL="$MODEL_DIR/final_checkpoint"
+    TRAINED_MODEL="$MODEL_DIR/best_checkpoint"
     ;;
   diprec_traj_rl|diprec_plan_rl)
     ensure_sft minionerec_sft "$MODEL" "$MINIONEREC_SFT" "$ITEM_META"
