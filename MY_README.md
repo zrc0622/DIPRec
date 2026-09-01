@@ -114,11 +114,17 @@ Run the single-GPU MiniOneRec workflow in this order. Use the same `--run_tag` i
 
 ### 1. SFT
 
+The command below is the recommended 46-GB-GPU configuration: micro-batch 8 and
+gradient accumulation 4, retaining an effective batch size of 32 while increasing
+per-step GPU work.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_sft \
   --dataset Video_Games \
   --run_tag sft10e \
+  --sft_micro_batch_size 8 \
+  --sft_gradient_accumulation_steps 4 \
   2>&1 | tee minionerec_sft_sft10e.log
 ```
 

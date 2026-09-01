@@ -114,11 +114,16 @@ Accelerate 配置必须使用普通 multi-GPU DDP。自定义集中式 rollout �
 
 ### 1. SFT
 
+以下命令是适合 46 GB 显存的推荐配置：micro-batch 为 8、梯度累积为 4，
+有效 batch 仍为 32，但每一步 GPU 计算量更大。
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_sft \
   --dataset Video_Games \
   --run_tag sft10e \
+  --sft_micro_batch_size 8 \
+  --sft_gradient_accumulation_steps 4 \
   2>&1 | tee minionerec_sft_sft10e.log
 ```
 
