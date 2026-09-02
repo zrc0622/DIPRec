@@ -280,6 +280,18 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL-method>/<run_id>/rl_train
 This file is safe to download while training is still running. Large checkpoints
 remain only under `output_dir/.../final_checkpoint`.
 
+To trim files produced by the older all-events logger, clean the whole output
+tree with:
+
+```bash
+python3 scripts/clean_rl_training_metrics.py outputs
+```
+
+Only files named `rl_training_metrics.json` are rewritten, and the original is
+kept beside each file as `rl_training_metrics.json.bak` by default. Add
+`--dry-run` to preview or `--no-backup` to skip backups. A single JSON file path
+can be passed instead of `outputs`.
+
 Supported methods:
 
 ```text

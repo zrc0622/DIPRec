@@ -267,6 +267,16 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL方法>/<run_id>/rl_traini
 该文件可在训练尚未结束时直接下载查看；大 checkpoint 仍只保存在
 `output_dir/.../final_checkpoint`。
 
+若旧版本已经生成了包含全部训练事件的文件，可一次性清理整个输出目录：
+
+```bash
+python3 scripts/clean_rl_training_metrics.py outputs
+```
+
+脚本只改写名为 `rl_training_metrics.json` 的文件，并默认在旁边保留原文件
+`rl_training_metrics.json.bak`。先预览可加 `--dry-run`；确认不需要备份时可加
+`--no-backup`。也可以把 `outputs` 换成某个具体 JSON 文件路径。
+
 可用方法：
 
 ```text
