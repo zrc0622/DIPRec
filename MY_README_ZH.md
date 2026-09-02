@@ -23,7 +23,7 @@ python -c "import torch, trl; print('torch', torch.__version__, 'CUDA', torch.ve
 
 RL 训练沿用 MiniOneRec 的 constrained beam sampling（`do_sample=True`）。七组评测的 SID 排序阶段统一使用确定性 constrained beam（`do_sample=False`）和 80 个原始 SID 候选预算；候选按 SID 去重后截取**最多** Top-10，不用重复项补满。DIPRec 将 80 个候选分配给各 plan（默认 `8 × 10`），再按 `log p(plan) + log p(SID | plan)` 联合排序；兴趣 plan 仍按固定 seed 采样。
 
-单张 46 GB GPU 的推荐 MiniOneRec-SFT 配方为：最多 6 epoch、micro-batch 8、累积 4（有效 batch 32）、学习率 `1e-4`、3% cosine warmup。在 Video Games 的三组实验中，`1e-4` 的 validation/test NDCG 优于 `5e-5` 和 `2e-4`；下方命令会显式传入这些参数。每完成一个 epoch，指标都会写入 `outputs/.../sft_training_metrics.json`；最低 validation loss 的权重保存到 `output_dir/.../best_checkpoint`，最后一轮仍保存在 `output_dir/.../final_checkpoint`。SFT 评测和后续 RL 会自动使用 `best_checkpoint`。Direct/MiniOneRec-RL 仍使用 micro-batch 1/累积 16，DIPRec-RL 使用 micro-batch 1/累积 8。两个 RL trainer 都会自动令全局 generation batch 等于 `per_device_batch_size × world_size × gradient_accumulation_steps`（单卡分别为 16 和 8）。它们不是硬件最优值；先执行 `--dry_run`，再按远端 GPU 调整对应训练脚本参数。两个 DIPRec-RL 方法都使用冻结的 DIPRec-SFT reference（`beta=1e-3`），缓存 old-policy log-prob，并将每批 rollout 复用两次（`num_iterations=2`），因此第二次更新开始 PPO clipping 会实际生效。`diprec_traj_rl` 将完整轨迹 advantage 同时用于两阶段；`diprec_plan_rl` 保留 plan 跨 G、SID 在 B 内的两级 advantage。
+单张 46 GB GPU 的推荐 MiniOneRec-SFT 配方为：最多 6 epoch、micro-batch 8、累积 4（有效 batch 32）、学习率 `1e-4`、3% cosine warmup。在 Video Games 的三组实验中，`1e-4` 的 validation/test NDCG 优于 `5e-5` 和 `2e-4`；下方命令会显式传入这些参数。每完成一个 epoch，指标都会写入 `outputs/.../sft_training_metrics.json`；最低 validation loss 的权重保存到 `output_dir/.../best_checkpoint`，最后一轮仍保存在 `output_dir/.../final_checkpoint`。SFT 评测和后续 RL 会自动使用 `best_checkpoint`。Direct/MiniOneRec-RL 针对单张 40/46 GB GPU 使用 micro-batch 8/累积 2，DIPRec-RL 仍使用 micro-batch 1/累积 8；对应的单卡有效 batch 分别为 16 和 8。两个 RL trainer 都会自动令全局 generation batch 等于 `per_device_batch_size × world_size × gradient_accumulation_steps`。两个 DIPRec-RL 方法都使用冻结的 DIPRec-SFT reference（`beta=1e-3`），缓存 old-policy log-prob，并将每批 rollout 复用两次（`num_iterations=2`），因此第二次更新开始 PPO clipping 会实际生效。`diprec_traj_rl` 将完整轨迹 advantage 同时用于两阶段；`diprec_plan_rl` 保留 plan 跨 G、SID 在 B 内的两级 advantage。
 
 ## 2. 放置官方数据
 
@@ -155,6 +155,8 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --sft_run_tag sft6e_lr1e-4_best \
   --run_tag rl_fixed_ref \
   --baseline_rl_reference_mode fixed \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 2 \
   2>&1 | tee minionerec_rl_office_fixed_ref.log
 ```
 
@@ -169,6 +171,8 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
   --baseline_rl_reference_mode sync \
   --baseline_rl_ref_model_sync_steps 512 \
   --baseline_rl_ref_model_mixup_alpha 0.6 \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 2 \
   2>&1 | tee minionerec_rl_office_sync_ref.log
 ```
 

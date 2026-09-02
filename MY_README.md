@@ -23,7 +23,7 @@ MiniOneRec here is a comparable shared-contract reproduction, not a line-for-lin
 
 RL training uses MiniOneRec's constrained beam-sampling behavior (`do_sample=True`). The SID-ranking stage of all seven evaluations uses deterministic constrained beams (`do_sample=False`) and the same budget of 80 raw SID candidates. Candidates are ranked, deduplicated by SID, and truncated to **at most** Top-10; no duplicate is inserted to fill a short list. DIPRec divides the 80 candidates across plans (default `8 × 10`) and ranks trajectories jointly by `log p(plan) + log p(SID | plan)`. Its interest plans remain sampled under the fixed seed.
 
-The recommended single-46-GB-GPU MiniOneRec-SFT recipe uses at most 6 epochs, micro-batch 8, accumulation 4 (effective batch 32), learning rate `1e-4`, and 3% cosine warmup. In the Video Games sweep, `1e-4` outperformed `5e-5` and `2e-4` on validation/test NDCG. Each completed epoch is persisted to `outputs/.../sft_training_metrics.json`; the lowest-validation-loss weights are saved to `output_dir/.../best_checkpoint`, while the last epoch remains in `output_dir/.../final_checkpoint`. SFT evaluation and downstream RL automatically use `best_checkpoint`. Direct/MiniOneRec-RL still uses micro-batch 1/accumulation 16, and DIPRec-RL uses micro-batch 1/accumulation 8. Both RL trainers automatically set the global generation batch to `per_device_batch_size × world_size × gradient_accumulation_steps` (16 and 8 respectively on one GPU). They are not hardware-optimal; run `--dry_run` first and tune the low-level trainer flags for the remote GPUs. Both DIPRec-RL methods now use a frozen DIPRec-SFT reference (`beta=1e-3`), cache old-policy log-probabilities, and reuse each rollout twice (`num_iterations=2`), so PPO clipping becomes active after the first update. `diprec_traj_rl` applies each trajectory advantage to both stages; `diprec_plan_rl` keeps plan-across-G and SID-within-B advantages separate.
+The recommended single-46-GB-GPU MiniOneRec-SFT recipe uses at most 6 epochs, micro-batch 8, accumulation 4 (effective batch 32), learning rate `1e-4`, and 3% cosine warmup. In the Video Games sweep, `1e-4` outperformed `5e-5` and `2e-4` on validation/test NDCG. Each completed epoch is persisted to `outputs/.../sft_training_metrics.json`; the lowest-validation-loss weights are saved to `output_dir/.../best_checkpoint`, while the last epoch remains in `output_dir/.../final_checkpoint`. SFT evaluation and downstream RL automatically use `best_checkpoint`. Direct/MiniOneRec-RL uses micro-batch 8/accumulation 2 on a single 40/46 GB GPU, while DIPRec-RL remains at micro-batch 1/accumulation 8; their single-GPU effective batches are 16 and 8. Both RL trainers automatically set the global generation batch to `per_device_batch_size × world_size × gradient_accumulation_steps`. Both DIPRec-RL methods now use a frozen DIPRec-SFT reference (`beta=1e-3`), cache old-policy log-probabilities, and reuse each rollout twice (`num_iterations=2`), so PPO clipping becomes active after the first update. `diprec_traj_rl` applies each trajectory advantage to both stages; `diprec_plan_rl` keeps plan-across-G and SID-within-B advantages separate.
 
 ## 2. Place the official data
 
@@ -157,6 +157,8 @@ CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --sft_run_tag sft6e_lr1e-4_best \
   --run_tag rl_fixed_ref \
   --baseline_rl_reference_mode fixed \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 2 \
   2>&1 | tee minionerec_rl_office_fixed_ref.log
 ```
 
@@ -172,6 +174,8 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
   --baseline_rl_reference_mode sync \
   --baseline_rl_ref_model_sync_steps 512 \
   --baseline_rl_ref_model_mixup_alpha 0.6 \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 2 \
   2>&1 | tee minionerec_rl_office_sync_ref.log
 ```
 
