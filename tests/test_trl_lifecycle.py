@@ -412,6 +412,26 @@ class TRLLifecycleTest(unittest.TestCase):
             expected_generation_calls = 1 if trainer.accelerator.is_main_process else 0
             self.assertEqual(generate_plans.call_count, expected_generation_calls)
             self.assertEqual(generate_candidates.call_count, 2 * expected_generation_calls)
+            if world_size == 1:
+                with (
+                    mock.patch("diprec.grpo._generate_plans", side_effect=fake_plans),
+                    mock.patch(
+                        "diprec.grpo._generate_sid_candidates",
+                        side_effect=fake_candidates,
+                    ),
+                ):
+                    metrics = trainer.evaluate(
+                        Dataset.from_list(
+                            [
+                                {
+                                    "prompt": "unused",
+                                    "sample_id": "valid-0",
+                                    "target_sid_levels": target_tokens,
+                                }
+                            ]
+                        )
+                    )
+                self.assertIn("eval_loss", metrics)
             if world_size == 2:
                 import torch.distributed as dist
 
@@ -586,6 +606,14 @@ class TRLLifecycleTest(unittest.TestCase):
             self.assertEqual(
                 list(trainer._logs["rewards"]["exact_match_reward"]), [1.0, 0.0]
             )
+            if world_size == 1:
+                with mock.patch.object(type(model), "generate", new=fake_generate):
+                    metrics = trainer.evaluate(
+                        Dataset.from_list(
+                            [{"prompt": "history", "target_sid": target, "sample_id": "valid-0"}]
+                        )
+                    )
+                self.assertIn("eval_loss", metrics)
             if world_size == 2:
                 import torch.distributed as dist
 

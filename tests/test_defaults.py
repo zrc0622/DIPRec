@@ -77,10 +77,12 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "baseline_rl_reference_mode": "BASELINE_RL_REFERENCE_MODE",
             "baseline_rl_ref_model_sync_steps": "BASELINE_RL_REF_MODEL_SYNC_STEPS",
             "baseline_rl_ref_model_mixup_alpha": "BASELINE_RL_REF_MODEL_MIXUP_ALPHA",
+            "baseline_rl_eval_steps": "BASELINE_RL_EVAL_STEPS",
             "diprec_rl_per_device_batch_size": "DIPREC_RL_PER_DEVICE_BATCH_SIZE",
             "diprec_rl_gradient_accumulation_steps": "DIPREC_RL_GRADIENT_ACCUMULATION_STEPS",
             "diprec_rl_num_iterations": "DIPREC_RL_NUM_ITERATIONS",
             "diprec_rl_beta": "DIPREC_RL_BETA",
+            "diprec_rl_eval_steps": "DIPREC_RL_EVAL_STEPS",
             "sid_beams": "SID_BEAMS",
             "eval_beams": "EVAL_BEAMS",
             "eval_candidate_budget": "EVAL_CANDIDATE_BUDGET",
@@ -152,6 +154,7 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "num_iterations": "baseline_rl_num_iterations",
             "learning_rate": "baseline_rl_learning_rate",
             "num_epochs": "baseline_rl_num_epochs",
+            "eval_steps": "baseline_rl_eval_steps",
         }
         for parser_key, config_key in baseline_mapping.items():
             self.assertEqual(baseline[parser_key], self.config[config_key])
@@ -165,6 +168,7 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "num_iterations": "diprec_rl_num_iterations",
             "learning_rate": "diprec_rl_learning_rate",
             "num_epochs": "diprec_rl_num_epochs",
+            "eval_steps": "diprec_rl_eval_steps",
             "interest_loss_weight": "interest_loss_weight",
             "sid_loss_weight": "sid_loss_weight",
         }
@@ -186,6 +190,8 @@ class DefaultConfigurationContractTest(unittest.TestCase):
                 "parent",
                 "--train_file",
                 "train.jsonl",
+                "--valid_file",
+                "valid.jsonl",
                 "--sid_index",
                 "index.json",
                 "--item_meta",

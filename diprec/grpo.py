@@ -955,9 +955,14 @@ def _diprec_rl_rows(
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     train_path = Path(args.train_file)
+    valid_path = Path(args.valid_file)
     manifest = _manifest_for(train_path)
     records = read_jsonl(train_path)
+    valid_records = read_jsonl(valid_path)
     history_stats = validate_history_records(records, args.max_history_len, manifest)
+    valid_history_stats = validate_history_records(
+        valid_records, args.max_history_len, manifest
+    )
     validate_manifest_sid_index(manifest, args.sid_index)
     sid_map = load_sid_map(args.sid_index)
     if not args.dry_run:
@@ -1011,7 +1016,9 @@ def train(args: argparse.Namespace) -> None:
                     "mode": args.mode,
                     "trainer": "trl.GRPOTrainer@0.24.0 + DIPRec hierarchical override",
                     "records": len(records),
+                    "valid_records": len(valid_records),
                     "history": history_stats,
+                    "valid_history": valid_history_stats,
                     "catalog_items": len(sid_map),
                     "model": args.model,
                     "group_shape": [args.num_plans, args.sid_beams],
@@ -1071,10 +1078,14 @@ def train(args: argparse.Namespace) -> None:
     train_dataset = Dataset.from_list(
         _diprec_rl_rows(records, args.max_history_len, args.interest_topk)
     ).shuffle(seed=args.seed)
+    valid_dataset = Dataset.from_list(
+        _diprec_rl_rows(valid_records, args.max_history_len, args.interest_topk)
+    )
     bf16 = bool(torch.cuda.is_available() and torch.cuda.is_bf16_supported())
     training_args = GRPOConfig(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
+        per_device_eval_batch_size=args.num_plans,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         num_train_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
@@ -1086,7 +1097,8 @@ def train(args: argparse.Namespace) -> None:
         logging_steps=args.log_every,
         save_strategy="epoch",
         save_total_limit=1,
-        eval_strategy="no",
+        eval_strategy="steps",
+        eval_steps=args.eval_steps,
         report_to="none",
         remove_unused_columns=False,
         bf16=bf16,
@@ -1122,6 +1134,7 @@ def train(args: argparse.Namespace) -> None:
         processing_class=tokenizer,
         reward_funcs=[_unused_reward],
         train_dataset=train_dataset,
+        eval_dataset=valid_dataset,
         args=training_args,
         sid_trie=trie,
         sid_map=sid_map,
@@ -1170,6 +1183,7 @@ def train(args: argparse.Namespace) -> None:
             ),
             "trainer": "trl.GRPOTrainer@0.24.0 + DIPRec hierarchical override",
             "history": history_stats,
+            "valid_history": valid_history_stats,
             "group_shape": [args.num_plans, args.sid_beams],
             "data_manifest": processed_data_fingerprint(manifest),
             "item_meta_sha256": sha256_file(args.item_meta),
@@ -1189,6 +1203,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=DIPREC_MODES, required=True)
     parser.add_argument("--model", required=True, help="DIPRec SFT checkpoint")
     parser.add_argument("--train_file", required=True)
+    parser.add_argument("--valid_file", required=True)
     parser.add_argument("--sid_index", required=True)
     parser.add_argument(
         "--item_meta", required=True, help="Item metadata used by the MiniOneRec-SFT parent"
@@ -1242,6 +1257,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--optim", default="adamw_torch")
     parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument(
+        "--eval_steps",
+        type=float,
+        default=0.1,
+        help="Validation interval; values below 1 are a fraction of total training steps",
+    )
     parser.add_argument(
         "--per_device_batch_size",
         "--train_batch_size",

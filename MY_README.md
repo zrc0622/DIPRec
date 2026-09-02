@@ -224,6 +224,13 @@ Their checkpoints and metrics use separate `seed_42_rl_fixed_ref` and
 the TRL defaults selected by MiniOneRec's `sync_ref_model=True`; the fixed job
 always computes KL against the initial SFT weights.
 
+All RL methods default to `eval_steps=0.1`, running RL validation at roughly
+every 10% of total training steps (about ten times over the full run). These
+measurements expose validation-loss trends; full Recall/NDCG evaluation still
+runs after training. The workflow saves and evaluates `final_checkpoint` rather than selecting a best
+checkpoint from noisy RL validation metrics. Override the interval with
+`--baseline_rl_eval_steps` or `--diprec_rl_eval_steps`.
+
 Supported methods:
 
 ```text

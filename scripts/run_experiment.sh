@@ -38,11 +38,13 @@ BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=1
 BASELINE_RL_REFERENCE_MODE="fixed"
 BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
+BASELINE_RL_EVAL_STEPS=0.1
 DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
 DIPREC_RL_GENERATION_BATCH_SIZE=""
 DIPREC_RL_GRADIENT_ACCUMULATION_STEPS=8
 DIPREC_RL_NUM_ITERATIONS=2
 DIPREC_RL_BETA=0.001
+DIPREC_RL_EVAL_STEPS=0.1
 SKIP_PREPROCESS=0
 DRY_RUN=0
 
@@ -86,11 +88,13 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_reference_mode) BASELINE_RL_REFERENCE_MODE="$2"; shift 2 ;;
     --baseline_rl_ref_model_sync_steps) BASELINE_RL_REF_MODEL_SYNC_STEPS="$2"; shift 2 ;;
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
+    --baseline_rl_eval_steps) BASELINE_RL_EVAL_STEPS="$2"; shift 2 ;;
     --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_gradient_accumulation_steps) DIPREC_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
     --diprec_rl_num_iterations) DIPREC_RL_NUM_ITERATIONS="$2"; shift 2 ;;
     --diprec_rl_beta) DIPREC_RL_BETA="$2"; shift 2 ;;
+    --diprec_rl_eval_steps) DIPREC_RL_EVAL_STEPS="$2"; shift 2 ;;
     --skip_preprocess) SKIP_PREPROCESS=1; shift ;;
     --dry_run) DRY_RUN=1; shift ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
@@ -346,6 +350,7 @@ run_baseline_rl() {
     --reference_mode "$BASELINE_RL_REFERENCE_MODE"
     --ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
     --ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"
+    --eval_steps "$BASELINE_RL_EVAL_STEPS"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"
     --seed "$SEED")
@@ -396,6 +401,7 @@ case "$METHOD" in
       --mode "$MODE"
       --model "$DIPREC_SFT"
       --train_file "$DATA_DIR/train.jsonl"
+      --valid_file "$DATA_DIR/valid.jsonl"
       --sid_index "$SID_INDEX"
       --item_meta "$ITEM_META"
       --output_dir "$MODEL_DIR/final_checkpoint"
@@ -412,6 +418,7 @@ case "$METHOD" in
       --gradient_accumulation_steps "$DIPREC_RL_GRADIENT_ACCUMULATION_STEPS"
       --num_iterations "$DIPREC_RL_NUM_ITERATIONS"
       --beta "$DIPREC_RL_BETA"
+      --eval_steps "$DIPREC_RL_EVAL_STEPS"
       --seed "$SEED")
     if [[ -n "$DIPREC_RL_GENERATION_BATCH_SIZE" ]]; then
       GRPO_CMD+=(--generation_batch_size "$DIPREC_RL_GENERATION_BATCH_SIZE")

@@ -618,7 +618,7 @@ def train(args: argparse.Namespace) -> None:
     training_args = GRPOConfig(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
-        per_device_eval_batch_size=args.per_device_batch_size,
+        per_device_eval_batch_size=args.num_generations,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         num_train_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
@@ -629,7 +629,8 @@ def train(args: argparse.Namespace) -> None:
         logging_steps=args.log_every,
         save_strategy="epoch",
         save_total_limit=1,
-        eval_strategy="no",
+        eval_strategy="steps",
+        eval_steps=args.eval_steps,
         report_to="none",
         remove_unused_columns=False,
         bf16=bf16,
@@ -724,6 +725,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_grad_norm", type=float, default=0.3)
     parser.add_argument("--optim", default="adamw_torch")
     parser.add_argument("--num_epochs", type=int, default=2)
+    parser.add_argument(
+        "--eval_steps",
+        type=float,
+        default=0.1,
+        help="Validation interval; values below 1 are a fraction of total training steps",
+    )
     parser.add_argument(
         "--per_device_batch_size",
         type=int,

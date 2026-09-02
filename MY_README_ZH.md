@@ -214,6 +214,12 @@ RL checkpoint/指标分别写入 `seed_42_rl_fixed_ref` 和 `seed_42_rl_sync_ref
 同步组的 512/0.6 正是 MiniOneRec 启动脚本启用 `sync_ref_model=True` 后采用的
 TRL 默认值；固定组则始终以初始 SFT 权重计算 KL。
 
+所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
+validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
+validation loss；完整的 Recall/NDCG 仍在训练结束后计算。当前仍保存和最终评测训练结束时的 `final_checkpoint`，
+不会根据 noisy RL validation 指标自动选择 best checkpoint。可用
+`--baseline_rl_eval_steps` 或 `--diprec_rl_eval_steps` 覆盖间隔。
+
 可用方法：
 
 ```text

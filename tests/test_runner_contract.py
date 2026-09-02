@@ -135,6 +135,8 @@ class RunnerContractTest(unittest.TestCase):
                 self.assertIn("--num_generations 16", result.stdout)
                 self.assertIn("--per_device_batch_size 32", result.stdout)
                 self.assertIn("--gradient_accumulation_steps 1", result.stdout)
+                self.assertIn("--valid_file", result.stdout)
+                self.assertIn("--eval_steps 0.1", result.stdout)
 
     def test_sft_recipe_controls_and_metrics_file_are_forwarded(self):
         result = subprocess.run(
@@ -329,6 +331,8 @@ class RunnerContractTest(unittest.TestCase):
                 )
                 self.assertIn("--num_iterations 2", result.stdout)
                 self.assertIn("--beta 0.001", result.stdout)
+                self.assertIn("--valid_file", result.stdout)
+                self.assertIn("--eval_steps 0.1", result.stdout)
                 self.assertIn("--interest_strategy frequency", result.stdout)
                 self.assertIn("--time_decay 0.1", result.stdout)
 
