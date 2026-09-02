@@ -63,6 +63,8 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "interest_topk": "INTEREST_TOPK",
             "interest_strategy": "INTEREST_STRATEGY",
             "time_decay": "TIME_DECAY",
+            "sft_plan_mode": "SFT_PLAN_MODE",
+            "sft_num_plans": "SFT_NUM_PLANS",
             "interest_parameterization": "INTEREST_PARAMETERIZATION",
             "conditioning": "CONDITIONING",
             "num_plans": "NUM_PLANS",
@@ -142,6 +144,8 @@ class DefaultConfigurationContractTest(unittest.TestCase):
                 self.assertEqual(sft[parser_key], self.config[config_key])
         self.assertIsNone(sft["training_metrics_file"])
         self.assertIsNone(sft["best_output_dir"])
+        self.assertIsNone(baseline["training_metrics_file"])
+        self.assertIsNone(diprec_rl["training_metrics_file"])
         baseline_mapping = {
             "num_generations": "baseline_rl_num_generations",
             "per_device_batch_size": "baseline_rl_per_device_batch_size",

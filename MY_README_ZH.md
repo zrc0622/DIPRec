@@ -170,6 +170,43 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e
 
 后续 `diprec_traj_rl` 和 `diprec_plan_rl` 会自动使用上述 `best_checkpoint`。
 
+#### DIPRec 兴趣多样性消融（Office Products）
+
+`single` 完全保留原实现：每条历史只有一个 frequency Top-K plan。`diverse`
+则从同一历史前缀实际出现过的一级兴趣中，确定性构造最多 8 个内容不同的合法
+plan；不会读取目标 item，也不会把同一组 token 的不同排列计作不同 plan。
+多样标签只扩展 plan-generation 任务；SID 监督仍只与原 frequency Top-K 主 plan
+配对，避免把同一 target 强行绑定到所有替代 plan，导致模型忽略 plan。
+
+```bash
+# 单一 SFT
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_single \
+  --sft_plan_mode single --sft_num_plans 8 \
+  --sft_num_epochs 6 --sft_micro_batch_size 8 \
+  --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
+
+# 多样性 SFT
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_diverse \
+  --sft_plan_mode diverse --sft_num_plans 8 \
+  --sft_num_epochs 6 --sft_micro_batch_size 8 \
+  --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
+
+# 单一 SFT 对应的 RL
+CUDA_VISIBLE_DEVICES=2 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_single \
+  --run_tag plan_single_rl --sft_plan_mode single --sft_num_plans 8
+
+# 多样性 SFT 对应的 RL
+CUDA_VISIBLE_DEVICES=3 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_diverse \
+  --run_tag plan_diverse_rl --sft_plan_mode diverse --sft_num_plans 8
+```
+
+两组 RL 的算法和超参数相同，唯一实验变量是父 SFT 的 plan 监督方式。评测均先
+对生成 plan 去重，再按实际唯一 plan 数重新分配固定的 80 个 SID 候选预算。
+
 ### 3. RL
 
 推荐先在 Office Products 上同时运行 fixed-reference 与原版 MiniOneRec 风格的
@@ -219,6 +256,16 @@ validation split 上运行一次 RL validation（全程约 10 次）。这些结
 validation loss；完整的 Recall/NDCG 仍在训练结束后计算。当前仍保存和最终评测训练结束时的 `final_checkpoint`，
 不会根据 noisy RL validation 指标自动选择 best checkpoint。可用
 `--baseline_rl_eval_steps` 或 `--diprec_rl_eval_steps` 覆盖间隔。
+
+训练期间，TRL 每次正常输出日志时，主进程也会原子更新以下轻量文件；它包含
+train loss、reward、KL、学习率以及周期性 `eval_loss`，不会额外提高终端日志频率：
+
+```text
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL方法>/<run_id>/rl_training_metrics.json
+```
+
+该文件可在训练尚未结束时直接下载查看；大 checkpoint 仍只保存在
+`output_dir/.../final_checkpoint`。
 
 可用方法：
 

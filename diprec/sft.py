@@ -19,7 +19,12 @@ from .data import (
     validate_checkpoint_training_contract,
     validate_manifest_sid_index,
 )
-from .interest import assert_prefix_only_label, diprec_response, interest_tokens_from_history
+from .interest import (
+    assert_prefix_only_label,
+    diprec_response,
+    interest_plans_from_history,
+    interest_tokens_from_history,
+)
 from .prompts import (
     history_prompt,
     history_to_title_prompt,
@@ -145,6 +150,8 @@ def encode_sft_records(
     conditioning: str,
     item_metadata: Mapping[str, Mapping[str, Any]] | None = None,
     sid_to_title: Mapping[str, str] | None = None,
+    sft_plan_mode: str = "single",
+    sft_num_plans: int = 8,
 ) -> list[dict[str, Any]]:
     method = canonical_sft_method(method)
     response, interest_tokens = response_for_record(
@@ -191,23 +198,55 @@ def encode_sft_records(
             ),
         ]
 
-    plan_response = response[: response.index("</think>") + len("</think>")]
-    plan_row = _encode_pair(
-        tokenizer,
-        plan_prompt(record, max_history_len, interest_topk),
-        plan_response,
-        max_seq_len,
-        metadata | {"stage": "interest_plan"},
-        thinking=True,
+    plans = interest_plans_from_history(
+        record["history_sid_levels"],
+        interest_topk,
+        sft_plan_mode,
+        sft_num_plans,
+        interest_strategy,
+        time_decay,
     )
-    sid_row = _encode_pair(
-        tokenizer,
-        sid_prompt(record, interest_tokens, max_history_len, conditioning),
-        str(record["target_item_sid"]),
-        max_seq_len,
-        metadata | {"stage": "sid_prediction"},
+    rows = []
+    for plan_index, plan_tokens in enumerate(plans):
+        plan_metadata = {
+            "sample_id": record.get("sample_id"),
+            "interest_tokens": plan_tokens,
+            "plan_index": plan_index,
+            "plan_count": len(plans),
+        }
+        plan_response = diprec_response(plan_tokens, str(record["target_item_sid"]))
+        plan_response = plan_response[: plan_response.index("</think>") + len("</think>")]
+        rows.append(
+            _encode_pair(
+                tokenizer,
+                plan_prompt(record, max_history_len, interest_topk),
+                plan_response,
+                max_seq_len,
+                plan_metadata | {"stage": "interest_plan"},
+                thinking=True,
+            )
+        )
+    # The target must not be used to decide which alternative history-only
+    # plans are relevant. Pairing that same target with every alternative
+    # would instead teach the decoder to ignore the plan. Preserve the legacy
+    # primary-plan SID task and let RL assign utility to sampled alternatives.
+    primary_tokens = plans[0]
+    rows.append(
+        _encode_pair(
+            tokenizer,
+            sid_prompt(record, primary_tokens, max_history_len, conditioning),
+            str(record["target_item_sid"]),
+            max_seq_len,
+            {
+                "sample_id": record.get("sample_id"),
+                "interest_tokens": primary_tokens,
+                "plan_index": 0,
+                "plan_count": len(plans),
+                "stage": "sid_prediction",
+            },
+        )
     )
-    return [plan_row, sid_row]
+    return rows
 
 
 def encode_catalog_sft_records(
@@ -401,6 +440,8 @@ def _save_sft_checkpoint(
 
 def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
+    if args.sft_num_plans < 1:
+        raise ValueError("sft_num_plans must be positive")
     method = canonical_sft_method(args.method)
     train_path = Path(args.train_file)
     valid_path = Path(args.valid_file)
@@ -443,10 +484,26 @@ def train(args: argparse.Namespace) -> None:
                 "history_sid_to_title": len(train_records),
             }
         elif method == "diprec_sft":
-            train_samples = 2 * len(train_records)
-            valid_samples = 2 * len(valid_records)
+            train_plan_count = sum(
+                len(interest_plans_from_history(
+                    record["history_sid_levels"], args.interest_topk,
+                    args.sft_plan_mode, args.sft_num_plans,
+                    args.interest_strategy, args.time_decay,
+                ))
+                for record in train_records
+            )
+            valid_plan_count = sum(
+                len(interest_plans_from_history(
+                    record["history_sid_levels"], args.interest_topk,
+                    args.sft_plan_mode, args.sft_num_plans,
+                    args.interest_strategy, args.time_decay,
+                ))
+                for record in valid_records
+            )
+            train_samples = train_plan_count + len(train_records)
+            valid_samples = valid_plan_count + len(valid_records)
             task_counts = {
-                "interest_plan": len(train_records),
+                "interest_plan": train_plan_count,
                 "sid_prediction": len(train_records),
             }
         print(
@@ -463,6 +520,8 @@ def train(args: argparse.Namespace) -> None:
                     "model": args.model,
                     "interest_parameterization": args.interest_parameterization,
                     "conditioning": args.conditioning,
+                    "sft_plan_mode": args.sft_plan_mode,
+                    "sft_num_plans": args.sft_num_plans,
                 },
                 indent=2,
             )
@@ -498,6 +557,8 @@ def train(args: argparse.Namespace) -> None:
             args.conditioning,
             item_metadata,
             sid_to_title,
+            args.sft_plan_mode,
+            args.sft_num_plans,
         )
     ]
     if method == "minionerec_sft":
@@ -520,6 +581,8 @@ def train(args: argparse.Namespace) -> None:
             args.conditioning,
             item_metadata,
             sid_to_title,
+            args.sft_plan_mode,
+            args.sft_num_plans,
         )
     ]
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
@@ -566,6 +629,8 @@ def train(args: argparse.Namespace) -> None:
             "weight_decay": args.weight_decay,
             "warmup_ratio": args.warmup_ratio,
             "max_seq_len": args.max_seq_len,
+            "sft_plan_mode": args.sft_plan_mode,
+            "sft_num_plans": args.sft_num_plans,
         },
         "best_checkpoint": str(best_output_dir),
         "final_checkpoint": str(args.output_dir),
@@ -708,6 +773,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--interest_topk", type=int, default=3)
     parser.add_argument("--interest_strategy", choices=("frequency", "time_decay"), default="frequency")
     parser.add_argument("--time_decay", type=float, default=0.1)
+    parser.add_argument("--sft_plan_mode", choices=("single", "diverse"), default="single")
+    parser.add_argument("--sft_num_plans", type=int, default=8)
     parser.add_argument("--interest_parameterization", choices=("independent_head", "disjoint_rows"), default="independent_head")
     parser.add_argument("--conditioning", choices=("history_visible", "interest_bottleneck"), default="interest_bottleneck")
     parser.add_argument("--num_epochs", type=int, default=6)

@@ -4,6 +4,8 @@
   "interest_topk": 3,
   "interest_strategy": "frequency",
   "time_decay": 0.1,
+  "sft_plan_mode": "single",
+  "sft_num_plans": 8,
   "interest_parameterization": "independent_head",
   "conditioning": "interest_bottleneck",
   "num_plans": 8,

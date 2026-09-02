@@ -36,6 +36,7 @@ from .runtime import (
     set_seed,
     thinking_prompt_ids,
 )
+from .rl_logging import PersistentRLTrainingMetricsCallback
 
 
 DIPREC_MODES = ("trajectory_grpo", "plan_grpo")
@@ -152,6 +153,7 @@ def _generate_plans(
     temperature: float,
     top_p: float,
     max_attempts: int,
+    require_full_plan_count: bool = True,
 ) -> tuple[list[int], list[list[int]], list[list[str]]]:
     import torch
 
@@ -202,10 +204,16 @@ def _generate_plans(
         unique_ids = select_unique_plans(candidates, num_plans)
     except RuntimeError as exc:
         unique_count = len({tuple(row) for row in candidates})
-        raise RuntimeError(
-            f"Sample {record.get('sample_id')} produced only {unique_count}/{num_plans} distinct plans "
-            f"after {max_attempts} rounds. Increase --plan_sampling_attempts/temperature or reduce --num_plans."
-        ) from exc
+        if require_full_plan_count:
+            raise RuntimeError(
+                f"Sample {record.get('sample_id')} produced only {unique_count}/{num_plans} distinct plans "
+                f"after {max_attempts} rounds. Increase --plan_sampling_attempts/temperature or reduce --num_plans."
+            ) from exc
+        if unique_count < 1:
+            raise RuntimeError(
+                f"Sample {record.get('sample_id')} produced no valid interest plan"
+            ) from exc
+        unique_ids = select_unique_plans(candidates, unique_count)
     token_lookup = {
         **{
             token_id: token
@@ -975,6 +983,8 @@ def train(args: argparse.Namespace) -> None:
                 "interest_topk": args.interest_topk,
                 "interest_strategy": args.interest_strategy,
                 "time_decay": args.time_decay,
+                "sft_plan_mode": args.sft_plan_mode,
+                "sft_num_plans": args.sft_num_plans,
                 "conditioning": args.conditioning,
                 "interest_parameterization": args.interest_parameterization,
             },
@@ -1163,6 +1173,8 @@ def train(args: argparse.Namespace) -> None:
         sid_loss_weight=args.sid_loss_weight,
         logprob_micro_batch_size=args.logprob_micro_batch_size,
     )
+    if args.training_metrics_file:
+        trainer.add_callback(PersistentRLTrainingMetricsCallback(args.training_metrics_file))
     trainer.train(resume_from_checkpoint=getattr(args, "resume_from_checkpoint", None))
     trainer.accelerator.wait_for_everyone()
     if trainer.accelerator.is_main_process:
@@ -1209,6 +1221,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--item_meta", required=True, help="Item metadata used by the MiniOneRec-SFT parent"
     )
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument(
+        "--training_metrics_file",
+        help="Continuously updated JSON log history, kept separately from checkpoints",
+    )
     parser.add_argument("--interest_topk", type=int, default=3)
     parser.add_argument(
         "--interest_strategy",
@@ -1220,6 +1236,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--time_decay",
         type=float,
         default=0.1,
+        help="Must match the DIPRec-SFT parent checkpoint",
+    )
+    parser.add_argument(
+        "--sft_plan_mode",
+        choices=("single", "diverse"),
+        default="single",
+        help="Must match the DIPRec-SFT parent checkpoint",
+    )
+    parser.add_argument(
+        "--sft_num_plans",
+        type=int,
+        default=8,
         help="Must match the DIPRec-SFT parent checkpoint",
     )
     parser.add_argument("--num_plans", type=int, default=8)

@@ -30,6 +30,7 @@ from .prompts import (
     title_to_sid_prompt,
 )
 from .runtime import load_model_runtime, require_replicated_generation_backend, set_seed
+from .rl_logging import PersistentRLTrainingMetricsCallback
 from .sft import catalog_alignment_maps
 
 RL_METHODS = ("direct_rl", "minionerec_rl")
@@ -669,6 +670,8 @@ def train(args: argparse.Namespace) -> None:
         eval_dataset=valid_dataset,
         args=training_args,
     )
+    if args.training_metrics_file:
+        trainer.add_callback(PersistentRLTrainingMetricsCallback(args.training_metrics_file))
     trainer.train()
     trainer.accelerator.wait_for_everyone()
     if trainer.accelerator.is_main_process:
@@ -704,6 +707,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sid_index", required=True)
     parser.add_argument("--item_meta")
     parser.add_argument("--output_dir", required=True)
+    parser.add_argument(
+        "--training_metrics_file",
+        help="Continuously updated JSON log history, kept separately from checkpoints",
+    )
     parser.add_argument("--max_history_len", type=int, default=50, choices=(10, 20, 50))
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--title_sequence_limit", type=int, default=10_000)

@@ -22,10 +22,13 @@ MAX_SEQ_LEN=2048
 SEED=42
 RUN_TAG=""
 SFT_RUN_TAG=""
+DIPREC_SFT_RUN_TAG=""
 CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
+SFT_PLAN_MODE="single"
+SFT_NUM_PLANS=8
 SFT_NUM_EPOCHS=6
 SFT_MICRO_BATCH_SIZE=4
 SFT_GRADIENT_ACCUMULATION_STEPS=8
@@ -72,10 +75,13 @@ while [[ $# -gt 0 ]]; do
     --seed) SEED="$2"; shift 2 ;;
     --run_tag) RUN_TAG="$2"; shift 2 ;;
     --sft_run_tag) SFT_RUN_TAG="$2"; shift 2 ;;
+    --diprec_sft_run_tag) DIPREC_SFT_RUN_TAG="$2"; shift 2 ;;
     --conditioning) CONDITIONING="$2"; shift 2 ;;
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_plan_mode) SFT_PLAN_MODE="$2"; shift 2 ;;
+    --sft_num_plans) SFT_NUM_PLANS="$2"; shift 2 ;;
     --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
     --sft_micro_batch_size) SFT_MICRO_BATCH_SIZE="$2"; shift 2 ;;
     --sft_gradient_accumulation_steps) SFT_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -111,10 +117,22 @@ if [[ -n "$SFT_RUN_TAG" && ! "$SFT_RUN_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; 
   echo "--sft_run_tag must start with an alphanumeric character and contain only letters, digits, ., _, or -" >&2
   exit 2
 fi
+if [[ -n "$DIPREC_SFT_RUN_TAG" && ! "$DIPREC_SFT_RUN_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "--diprec_sft_run_tag must start with an alphanumeric character and contain only letters, digits, ., _, or -" >&2
+  exit 2
+fi
 case "$BASELINE_RL_REFERENCE_MODE" in
   fixed|sync) ;;
   *) echo "--baseline_rl_reference_mode must be fixed or sync" >&2; exit 2 ;;
 esac
+case "$SFT_PLAN_MODE" in
+  single|diverse) ;;
+  *) echo "--sft_plan_mode must be single or diverse" >&2; exit 2 ;;
+esac
+if ! [[ "$SFT_NUM_PLANS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--sft_num_plans must be a positive integer" >&2
+  exit 2
+fi
 
 case "$DATASET" in
   Games) DATASET="Video_Games" ;;
@@ -197,6 +215,14 @@ if [[ -n "$SFT_RUN_TAG" ]]; then
 elif [[ -n "$RUN_TAG" ]]; then
   SFT_RUN_ID+="_$RUN_TAG"
 fi
+DIPREC_SFT_RUN_ID="seed_$SEED"
+if [[ -n "$DIPREC_SFT_RUN_TAG" ]]; then
+  DIPREC_SFT_RUN_ID+="_$DIPREC_SFT_RUN_TAG"
+elif [[ -n "$SFT_RUN_TAG" ]]; then
+  DIPREC_SFT_RUN_ID+="_$SFT_RUN_TAG"
+elif [[ -n "$RUN_TAG" ]]; then
+  DIPREC_SFT_RUN_ID+="_$RUN_TAG"
+fi
 RUN_DIR="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/$RUN_ID"
 MODEL_DIR="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$METHOD/$RUN_ID"
 mkdir -p "$RUN_DIR" "$MODEL_DIR"
@@ -265,7 +291,7 @@ fi
 
 DIRECT_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/direct_sft/$SFT_RUN_ID/best_checkpoint"
 MINIONEREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/minionerec_sft/$SFT_RUN_ID/best_checkpoint"
-DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/$SFT_RUN_ID/best_checkpoint"
+DIPREC_SFT="output_dir/$DATASET/$DATA_VARIANT/$MODEL_SLUG/diprec_sft/$DIPREC_SFT_RUN_ID/best_checkpoint"
 
 checkpoint_ready() {
   local checkpoint="$1" expected_method="$2" expected_parent="$3" expected_item_meta="${4:-}"
@@ -274,7 +300,7 @@ checkpoint_ready() {
   if [[ "$expected_method" == "diprec_sft" && "$INTEREST_PARAMETERIZATION" == "independent_head" ]]; then
     [[ -f "$checkpoint/diprec_adapter_config.json" && -f "$checkpoint/diprec_interest_adapter.pt" ]] || return 1
   fi
-  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10]}) if sys.argv[3]=="diprec_sft" else None; config_ok=all(training.get(k)==v for k,v in expected.items()); ok=training.get("checkpoint_role")=="best_validation" and training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION"
+  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10],"sft_plan_mode":sys.argv[11],"sft_num_plans":int(sys.argv[12])}) if sys.argv[3]=="diprec_sft" else None; defaults={"sft_plan_mode":"single","sft_num_plans":8}; config_ok=all(training.get(k,defaults.get(k))==v for k,v in expected.items()); ok=training.get("checkpoint_role")=="best_validation" and training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION" "$SFT_PLAN_MODE" "$SFT_NUM_PLANS"
 }
 
 run_sft() {
@@ -297,6 +323,8 @@ run_sft() {
     --interest_topk "$INTEREST_TOPK"
     --interest_strategy "$INTEREST_STRATEGY"
     --time_decay "$TIME_DECAY"
+    --sft_plan_mode "$SFT_PLAN_MODE"
+    --sft_num_plans "$SFT_NUM_PLANS"
     --conditioning "$CONDITIONING"
     --interest_parameterization "$INTEREST_PARAMETERIZATION"
     --max_history_len "$MAX_HISTORY_LEN"
@@ -344,6 +372,7 @@ run_baseline_rl() {
     --valid_file "$DATA_DIR/valid.jsonl"
     --sid_index "$SID_INDEX"
     --output_dir "$destination"
+    --training_metrics_file "$RUN_DIR/rl_training_metrics.json"
     --num_generations 16
     --per_device_batch_size "$BASELINE_RL_PER_DEVICE_BATCH_SIZE"
     --gradient_accumulation_steps "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS"
@@ -405,9 +434,12 @@ case "$METHOD" in
       --sid_index "$SID_INDEX"
       --item_meta "$ITEM_META"
       --output_dir "$MODEL_DIR/final_checkpoint"
+      --training_metrics_file "$RUN_DIR/rl_training_metrics.json"
       --interest_topk "$INTEREST_TOPK"
       --interest_strategy "$INTEREST_STRATEGY"
       --time_decay "$TIME_DECAY"
+      --sft_plan_mode "$SFT_PLAN_MODE"
+      --sft_num_plans "$SFT_NUM_PLANS"
       --num_plans "$NUM_PLANS"
       --sid_beams "$SID_BEAMS"
       --conditioning "$CONDITIONING"
@@ -444,6 +476,8 @@ EVAL_CMD=(bash scripts/eval_diprec.sh
   --interest_topk "$INTEREST_TOPK"
   --interest_strategy "$INTEREST_STRATEGY"
   --time_decay "$TIME_DECAY"
+  --sft_plan_mode "$SFT_PLAN_MODE"
+  --sft_num_plans "$SFT_NUM_PLANS"
   --num_plans "$NUM_PLANS"
   --sid_beams "$SID_BEAMS"
   --eval_beams "$EVAL_BEAMS"

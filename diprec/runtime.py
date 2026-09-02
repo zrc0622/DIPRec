@@ -122,7 +122,7 @@ def load_model_runtime(
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=True,
     )
     registry = register_tokens(tokenizer, model, sid_map) if include_interest else None

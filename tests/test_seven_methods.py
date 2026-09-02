@@ -119,6 +119,25 @@ class SevenMethodDataContractTest(unittest.TestCase):
         self.assertEqual([row["stage"] for row in direct], ["direct_sft"])
         self.assertEqual([row["stage"] for row in diprec], ["interest_plan", "sid_prediction"])
 
+    def test_diverse_diprec_sft_expands_plan_labels_but_keeps_one_sid_task(self):
+        tokenizer = FakeTokenizer()
+        record = dict(self.record)
+        record["history_sid_levels"] = [
+            ["<a_0>", "<b_0>", "<c_0>"],
+            ["<a_1>", "<b_1>", "<c_1>"],
+            ["<a_2>", "<b_2>", "<c_2>"],
+            ["<a_3>", "<b_3>", "<c_3>"],
+        ]
+        rows = encode_sft_records(
+            tokenizer, record, "diprec_sft", 50, 4096, 3,
+            "frequency", 0.1, "interest_bottleneck",
+            sft_plan_mode="diverse", sft_num_plans=4,
+        )
+        self.assertEqual(len(rows), 5)
+        self.assertEqual([row["stage"] for row in rows].count("interest_plan"), 4)
+        self.assertEqual([row["stage"] for row in rows].count("sid_prediction"), 1)
+        self.assertEqual({row["plan_count"] for row in rows}, {4})
+
     def test_minionerec_rl_matches_enabled_official_tasks(self):
         rows, counts = build_baseline_rl_rows(
             "minionerec_rl",

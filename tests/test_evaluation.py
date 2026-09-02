@@ -89,11 +89,56 @@ class EvaluationContractTest(unittest.TestCase):
         self.assertEqual(prediction["unique_candidate_count"], 3)
         self.assertEqual(prediction["returned_candidate_count"], 3)
         self.assertEqual(prediction["per_plan_candidate_budget"], [2, 2])
+        self.assertEqual(prediction["requested_plan_count"], 2)
+        self.assertEqual(prediction["returned_plan_count"], 2)
+        self.assertEqual(metrics["plan_valid_rate"], 1.0)
         self.assertEqual(
             prediction["candidate_sid_levels"], [duplicate, target, third]
         )
         self.assertEqual(metrics["Recall@5"], 1.0)
         self.assertAlmostEqual(metrics["NDCG@5"], 1.0 / __import__("math").log2(3))
+
+    def test_diprec_evaluation_reallocates_budget_when_plans_collapse(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        args = argparse.Namespace(
+            method="diprec_sft",
+            max_history_len=50,
+            max_seq_len=2048,
+            interest_topk=1,
+            num_plans=8,
+            eval_candidate_budget=8,
+            eval_beams=3,
+            plan_temperature=1.0,
+            plan_top_p=0.95,
+            plan_sampling_attempts=8,
+            conditioning="interest_bottleneck",
+        )
+        target = ["<a_1>", "<b_1>", "<c_1>"]
+        with (
+            mock.patch(
+                "diprec.evaluation._generate_plans",
+                return_value=([1], [[11]], [["<INT_0>"]]),
+            ),
+            mock.patch(
+                "diprec.evaluation._generate_sid_candidates",
+                return_value=([10], [[100]], [target], [True]),
+            ) as generate_sid,
+            mock.patch(
+                "diprec.evaluation._sequence_log_probs",
+                side_effect=[torch.tensor([-0.1]), torch.tensor([-0.2])],
+            ),
+        ):
+            prediction, metrics = _evaluate_record(
+                object(), object(), object(), object(), self.record, args
+            )
+        self.assertEqual(generate_sid.call_args.args[-2], 8)
+        self.assertEqual(prediction["requested_plan_count"], 8)
+        self.assertEqual(prediction["returned_plan_count"], 1)
+        self.assertEqual(prediction["per_plan_candidate_budget"], [8])
+        self.assertEqual(metrics["plan_valid_rate"], 0.125)
 
     def test_seven_model_checkpoint_contract_rejects_eval_drift(self):
         manifest = {

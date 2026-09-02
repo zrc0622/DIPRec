@@ -1,7 +1,13 @@
 import copy
 import unittest
 
-from diprec.interest import TokenRegistry, assert_prefix_only_label, interest_tokens_from_history, topk_interest_indices
+from diprec.interest import (
+    TokenRegistry,
+    assert_prefix_only_label,
+    interest_plans_from_history,
+    interest_tokens_from_history,
+    topk_interest_indices,
+)
 from diprec.prompts import sid_prompt
 
 
@@ -47,6 +53,36 @@ class InterestLabelTest(unittest.TestCase):
         changed["target_item_sid"] = "<a_17><b_9><c_9>"
         self.assertEqual(label, interest_tokens_from_history(changed["history_sid_levels"], 3))
         assert_prefix_only_label(changed, label)
+
+    def test_diverse_plans_change_content_not_just_order(self):
+        history = [
+            ["<a_1>", "<b_0>", "<c_0>"],
+            ["<a_1>", "<b_1>", "<c_1>"],
+            ["<a_2>", "<b_2>", "<c_2>"],
+            ["<a_3>", "<b_3>", "<c_3>"],
+            ["<a_4>", "<b_4>", "<c_4>"],
+        ]
+        plans = interest_plans_from_history(history, 3, "diverse", 4)
+        self.assertEqual(plans[0], ["<INT_001>", "<INT_002>", "<INT_003>"])
+        self.assertEqual(len(plans), 4)
+        self.assertEqual(len({tuple(sorted(plan)) for plan in plans}), 4)
+
+    def test_diverse_plans_are_deterministic_and_prefix_only(self):
+        first = interest_plans_from_history(self.history, 3, "diverse", 8)
+        changed = copy.deepcopy(self.record)
+        changed["target_sid_levels"] = ["<a_17>", "<b_9>", "<c_9>"]
+        changed["target_item_sid"] = "<a_17><b_9><c_9>"
+        second = interest_plans_from_history(
+            changed["history_sid_levels"], 3, "diverse", 8
+        )
+        self.assertEqual(first, second)
+        self.assertGreater(len(first), 1)
+
+    def test_single_plan_mode_preserves_legacy_label(self):
+        self.assertEqual(
+            interest_plans_from_history(self.history, 3, "single", 8),
+            [["<INT_017>", "<INT_042>", "<INT_PAD>"]],
+        )
 
     def test_strict_bottleneck_hides_history(self):
         prompt = sid_prompt(self.record, ["<INT_017>", "<INT_042>", "<INT_PAD>"], 50, "interest_bottleneck")

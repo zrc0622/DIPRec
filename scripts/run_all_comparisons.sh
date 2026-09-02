@@ -9,6 +9,7 @@ DATASET_FILE="configs/selected_long_history_datasets.txt"
 SEEDS="42"
 RUN_TAG=""
 SFT_RUN_TAG=""
+DIPREC_SFT_RUN_TAG=""
 MAX_HISTORY_LEN=50
 MAX_SEQ_LEN=2048
 EVAL_BEAMS=10
@@ -22,6 +23,8 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
+SFT_PLAN_MODE="single"
+SFT_NUM_PLANS=8
 SFT_NUM_EPOCHS=6
 SFT_MICRO_BATCH_SIZE=4
 SFT_GRADIENT_ACCUMULATION_STEPS=8
@@ -50,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     --seeds) SEEDS="$2"; shift 2 ;;
     --run_tag) RUN_TAG="$2"; shift 2 ;;
     --sft_run_tag) SFT_RUN_TAG="$2"; shift 2 ;;
+    --diprec_sft_run_tag) DIPREC_SFT_RUN_TAG="$2"; shift 2 ;;
     --max_history_len) MAX_HISTORY_LEN="$2"; shift 2 ;;
     --max_seq_len) MAX_SEQ_LEN="$2"; shift 2 ;;
     --eval_beams) EVAL_BEAMS="$2"; shift 2 ;;
@@ -63,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_plan_mode) SFT_PLAN_MODE="$2"; shift 2 ;;
+    --sft_num_plans) SFT_NUM_PLANS="$2"; shift 2 ;;
     --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
     --sft_micro_batch_size) SFT_MICRO_BATCH_SIZE="$2"; shift 2 ;;
     --sft_gradient_accumulation_steps) SFT_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -114,12 +120,15 @@ for dataset in "${DATASETS[@]}"; do
         --interest_parameterization "$INTEREST_PARAMETERIZATION"
         --interest_strategy "$INTEREST_STRATEGY"
         --time_decay "$TIME_DECAY"
+        --sft_plan_mode "$SFT_PLAN_MODE"
+        --sft_num_plans "$SFT_NUM_PLANS"
         --eval_beams "$EVAL_BEAMS"
         --eval_candidate_budget "$EVAL_CANDIDATE_BUDGET"
         --max_history_len "$MAX_HISTORY_LEN"
         --max_seq_len "$MAX_SEQ_LEN"
         --run_tag "$RUN_TAG"
         --sft_run_tag "$SFT_RUN_TAG"
+        --diprec_sft_run_tag "$DIPREC_SFT_RUN_TAG"
         --sft_num_epochs "$SFT_NUM_EPOCHS"
         --sft_micro_batch_size "$SFT_MICRO_BATCH_SIZE"
         --sft_gradient_accumulation_steps "$SFT_GRADIENT_ACCUMULATION_STEPS"

@@ -236,6 +236,68 @@ class RunnerContractTest(unittest.TestCase):
             result.stdout,
         )
 
+    def test_diprec_plan_supervision_ablation_is_forwarded(self):
+        for mode in ("single", "diverse"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [
+                        "bash", "scripts/run_experiment.sh",
+                        "--method", "diprec_sft", "--dataset", "Office",
+                        "--sft_run_tag", "sft6e_lr1e-4_best",
+                        "--run_tag", f"plan_{mode}",
+                        "--sft_plan_mode", mode, "--sft_num_plans", "8",
+                        "--dry_run",
+                    ],
+                    cwd=ROOT, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--sft_plan_mode {mode}", result.stdout)
+                self.assertIn("--sft_num_plans 8", result.stdout)
+                self.assertIn(f"diprec_sft/seed_42_plan_{mode}", result.stdout)
+
+    def test_diprec_rl_selects_single_or_diverse_sft_parent(self):
+        for mode in ("single", "diverse"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [
+                        "bash", "scripts/run_experiment.sh",
+                        "--method", "diprec_plan_rl", "--dataset", "Office",
+                        "--sft_run_tag", "sft6e_lr1e-4_best",
+                        "--diprec_sft_run_tag", f"plan_{mode}",
+                        "--run_tag", f"plan_{mode}_rl",
+                        "--sft_plan_mode", mode, "--sft_num_plans", "8",
+                        "--dry_run",
+                    ],
+                    cwd=ROOT, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(
+                    f"diprec_sft/seed_42_plan_{mode}/best_checkpoint",
+                    result.stdout,
+                )
+                self.assertIn(
+                    f"diprec_plan_rl/seed_42_plan_{mode}_rl/final_checkpoint",
+                    result.stdout,
+                )
+
+    def test_diprec_plan_supervision_ablation_is_forwarded(self):
+        for mode in ("single", "diverse"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [
+                        "bash", "scripts/run_experiment.sh",
+                        "--method", "diprec_sft", "--dataset", "Office",
+                        "--run_tag", f"plan_{mode}",
+                        "--sft_plan_mode", mode, "--sft_num_plans", "8",
+                        "--dry_run",
+                    ],
+                    cwd=ROOT, text=True, capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(f"--sft_plan_mode {mode}", result.stdout)
+                self.assertIn("--sft_num_plans 8", result.stdout)
+                self.assertIn(f"diprec_sft/seed_42_plan_{mode}", result.stdout)
+
     def test_run_tag_keeps_rl_parent_checkpoint_in_the_same_lineage(self):
         result = subprocess.run(
             [
@@ -265,6 +327,30 @@ class RunnerContractTest(unittest.TestCase):
         )
         self.assertIn(
             "--output_dir output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_sft6e/final_checkpoint",
+            result.stdout,
+        )
+        self.assertIn(
+            "--training_metrics_file outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_sft6e/rl_training_metrics.json",
+            result.stdout,
+        )
+
+    def test_diprec_rl_writes_metrics_separately_from_checkpoints(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh", "--method", "diprec_plan_rl",
+                "--dataset", "Office", "--sft_run_tag", "sft_parent",
+                "--diprec_sft_run_tag", "plan_parent", "--run_tag", "rl_child",
+                "--dry_run",
+            ],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "--training_metrics_file outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_plan_rl/seed_42_rl_child/rl_training_metrics.json",
+            result.stdout,
+        )
+        self.assertNotIn(
+            "final_checkpoint/rl_training_metrics.json",
             result.stdout,
         )
 

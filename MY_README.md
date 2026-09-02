@@ -175,6 +175,44 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e
 Both `diprec_traj_rl` and `diprec_plan_rl` automatically use that
 `best_checkpoint`.
 
+#### DIPRec plan-diversity ablation (Office Products)
+
+`single` preserves the original one-label frequency Top-K supervision. `diverse`
+deterministically builds up to eight content-distinct plans from level-1 interests
+observed in the history prefix only; it never reads the target or counts token
+permutations as different plans.
+Only the plan-generation task is expanded. SID supervision remains paired with
+the legacy frequency Top-K primary plan, avoiding the degenerate signal that
+every alternative plan should predict the same target.
+
+```bash
+# Single-plan SFT
+CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_single \
+  --sft_plan_mode single --sft_num_plans 8 --sft_num_epochs 6 \
+  --sft_micro_batch_size 8 --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
+
+# Diverse-plan SFT
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_diverse \
+  --sft_plan_mode diverse --sft_num_plans 8 --sft_num_epochs 6 \
+  --sft_micro_batch_size 8 --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
+
+# RL initialized from single-plan SFT
+CUDA_VISIBLE_DEVICES=2 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_single \
+  --run_tag plan_single_rl --sft_plan_mode single --sft_num_plans 8
+
+# RL initialized from diverse-plan SFT
+CUDA_VISIBLE_DEVICES=3 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_diverse \
+  --run_tag plan_diverse_rl --sft_plan_mode diverse --sft_num_plans 8
+```
+
+Both RL runs use the same algorithm and hyperparameters; only their parent SFT
+plan supervision differs. Evaluation deduplicates generated plans and reallocates
+the fixed 80-candidate SID budget across the unique plans actually returned.
+
 ### 3. RL
 
 First run a fixed-reference versus upstream-style periodically synchronized
@@ -230,6 +268,17 @@ measurements expose validation-loss trends; full Recall/NDCG evaluation still
 runs after training. The workflow saves and evaluates `final_checkpoint` rather than selecting a best
 checkpoint from noisy RL validation metrics. Override the interval with
 `--baseline_rl_eval_steps` or `--diprec_rl_eval_steps`.
+
+Whenever TRL emits its normal training log, the main process also atomically
+refreshes a lightweight file containing train loss, rewards, KL, learning rate,
+and periodic `eval_loss`, without increasing terminal logging frequency:
+
+```text
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL-method>/<run_id>/rl_training_metrics.json
+```
+
+This file is safe to download while training is still running. Large checkpoints
+remain only under `output_dir/.../final_checkpoint`.
 
 Supported methods:
 

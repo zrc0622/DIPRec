@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Any, Mapping, Sequence
 
 from .constants import INTEREST_BEGIN, INTEREST_END, INTEREST_PAD
@@ -56,6 +57,87 @@ def interest_tokens_from_history(
         INTEREST_PAD if index is None else interest_token(index)
         for index in topk_interest_indices(history_sid_levels, k, strategy, time_decay)
     ]
+
+
+def diverse_interest_plans_from_history(
+    history_sid_levels: Sequence[Sequence[str] | str],
+    k: int,
+    max_plans: int = 8,
+    strategy: str = "frequency",
+    time_decay: float = 0.1,
+) -> list[list[str]]:
+    """Build deterministic, content-distinct plan labels from history only.
+
+    The first plan is exactly the legacy top-k label. Additional labels are
+    different subsets of level-1 interests observed in the same prefix; mere
+    permutations are deduplicated. If fewer than ``k`` interests are selected,
+    shorter observed subsets are padded rather than inventing unseen interests.
+    """
+
+    if max_plans < 1:
+        raise ValueError("max_plans must be positive")
+    primary = topk_interest_indices(history_sid_levels, k, strategy, time_decay)
+    observed = [index for index in primary if index is not None]
+
+    scores: dict[int, float] = defaultdict(float)
+    latest: dict[int, int] = {}
+    total = len(history_sid_levels)
+    for position, levels in enumerate(history_sid_levels):
+        index = sid_index(parse_sid_levels(levels)[0])
+        weight = 1.0
+        if strategy == "time_decay":
+            weight = math.exp(-time_decay * (total - position - 1))
+        scores[index] += weight
+        latest[index] = position
+    ranked = sorted(scores, key=lambda index: (-scores[index], -latest[index], index))
+
+    plans: list[list[str]] = []
+    seen_content: set[tuple[int, ...]] = set()
+
+    def add_plan(indices: Sequence[int | None]) -> bool:
+        actual = [int(index) for index in indices if index is not None]
+        content_key = tuple(sorted(actual))
+        if content_key in seen_content:
+            return False
+        seen_content.add(content_key)
+        padded: list[int | None] = actual + [None] * (k - len(actual))
+        plans.append(
+            [
+                INTEREST_PAD if index is None else interest_token(index)
+                for index in padded
+            ]
+        )
+        return len(plans) == max_plans
+
+    if add_plan(primary):
+        return plans
+    width = min(k, len(ranked))
+    if len(ranked) > k:
+        recent = sorted(ranked, key=lambda index: (-latest[index], index))[:k]
+        if add_plan(recent):
+            return plans
+    for subset_width in range(width, 0, -1):
+        for subset_positions in combinations(range(len(ranked)), subset_width):
+            if add_plan([ranked[position] for position in subset_positions]):
+                return plans
+    return plans
+
+
+def interest_plans_from_history(
+    history_sid_levels: Sequence[Sequence[str] | str],
+    k: int,
+    mode: str = "single",
+    max_plans: int = 8,
+    strategy: str = "frequency",
+    time_decay: float = 0.1,
+) -> list[list[str]]:
+    if mode == "single":
+        return [interest_tokens_from_history(history_sid_levels, k, strategy, time_decay)]
+    if mode == "diverse":
+        return diverse_interest_plans_from_history(
+            history_sid_levels, k, max_plans, strategy, time_decay
+        )
+    raise ValueError("SFT plan mode must be 'single' or 'diverse'")
 
 
 def interest_plan_text(tokens: Sequence[str]) -> str:

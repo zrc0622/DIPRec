@@ -103,6 +103,8 @@ def validate_evaluation_checkpoint(
             "interest_topk": args.interest_topk,
             "interest_strategy": args.interest_strategy,
             "time_decay": args.time_decay,
+            "sft_plan_mode": getattr(args, "sft_plan_mode", "single"),
+            "sft_num_plans": getattr(args, "sft_num_plans", 8),
             "conditioning": args.conditioning,
             "interest_parameterization": args.interest_parameterization,
         }
@@ -276,6 +278,7 @@ def _evaluate_record(
                 args.plan_temperature,
                 args.plan_top_p,
                 args.plan_sampling_attempts,
+                require_full_plan_count=False,
             )
             scored = []
             plan_budgets = per_plan_candidate_budget(args.eval_candidate_budget, len(plans))
@@ -326,6 +329,7 @@ def _evaluate_record(
         **rank_metrics,
         "sid_valid_rate": sum(ranked_valid) / len(ranked_valid) if ranked_valid else 0.0,
         "interest_diversity": interest_diversity(plans),
+        "plan_valid_rate": len(plans) / args.num_plans if plans else 0.0,
         "sid_level1_hit": float(best_hits[0]),
         "sid_level2_hit": float(best_hits[1]),
         "sid_level3_hit": float(best_hits[2]),
@@ -337,6 +341,8 @@ def _evaluate_record(
         "candidate_sid_levels": ranked_candidates,
         "candidate_valid": ranked_valid,
         "interest_plans": plans,
+        "requested_plan_count": args.num_plans if plans else 0,
+        "returned_plan_count": len(plans),
         "trajectories": trajectories,
         "reasoning": reasoning,
         "raw_candidate_count": raw_candidate_count,
@@ -418,6 +424,8 @@ def evaluate(args: argparse.Namespace) -> None:
         "interest_topk": args.interest_topk if is_diprec else 0,
         "interest_strategy": args.interest_strategy if is_diprec else None,
         "time_decay": args.time_decay if is_diprec else None,
+        "sft_plan_mode": args.sft_plan_mode if is_diprec else None,
+        "sft_num_plans": args.sft_num_plans if is_diprec else 0,
         "num_plans": args.num_plans if is_diprec else 0,
         "training_sid_beams": args.sid_beams if args.method in {"diprec_traj_rl", "diprec_plan_rl"} else 0,
         "eval_beams": args.eval_beams,
@@ -494,6 +502,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--interest_strategy", choices=("frequency", "time_decay"), default="frequency"
     )
     parser.add_argument("--time_decay", type=float, default=0.1)
+    parser.add_argument("--sft_plan_mode", choices=("single", "diverse"), default="single")
+    parser.add_argument("--sft_num_plans", type=int, default=8)
     parser.add_argument("--num_plans", type=int, default=8)
     parser.add_argument("--sid_beams", type=int, default=8)
     parser.add_argument("--eval_beams", type=int, default=10)
