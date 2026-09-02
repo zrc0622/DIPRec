@@ -142,19 +142,45 @@ outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e
 
 ### 2. RL
 
+推荐先在 Office Products 上同时运行 fixed-reference 与原版 MiniOneRec 风格的
+periodic-sync reference 消融。两组都读取同一个 SFT best checkpoint；`--run_tag`
+只隔离 RL 输出，`--sft_run_tag` 专门指定共享的 SFT 父模型。
+
+终端 1（GPU 0，固定 reference）：
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_rl \
-  --dataset Video_Games \
-  --run_tag sft6e_lr1e-4_best \
-  2>&1 | tee minionerec_rl_sft6e_lr1e-4_best.log
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_fixed_ref \
+  --baseline_rl_reference_mode fixed \
+  2>&1 | tee minionerec_rl_office_fixed_ref.log
 ```
 
-此 `run_tag` 下，RL 会从以下 SFT checkpoint 初始化：
+终端 2（GPU 1，每 512 optimizer steps 同步一次，`ref ← 0.6·policy + 0.4·ref`）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
+  --method minionerec_rl \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_sync_ref \
+  --baseline_rl_reference_mode sync \
+  --baseline_rl_ref_model_sync_steps 512 \
+  --baseline_rl_ref_model_mixup_alpha 0.6 \
+  2>&1 | tee minionerec_rl_office_sync_ref.log
+```
+
+两组都从以下 SFT checkpoint 初始化：
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
+output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
+
+RL checkpoint/指标分别写入 `seed_42_rl_fixed_ref` 和 `seed_42_rl_sync_ref`，不会互相覆盖。
+同步组的 512/0.6 正是 MiniOneRec 启动脚本启用 `sync_ref_model=True` 后采用的
+TRL 默认值；固定组则始终以初始 SFT 权重计算 KL。
 
 可用方法：
 

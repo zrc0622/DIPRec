@@ -511,6 +511,9 @@ class TRLLifecycleTest(unittest.TestCase):
                 max_prompt_length=96,
                 max_completion_length=4,
                 beta=1e-3,
+                sync_ref_model=True,
+                ref_model_sync_steps=1,
+                ref_model_mixup_alpha=1.0,
                 use_vllm=False,
                 bf16=False,
                 fp16=False,
@@ -531,6 +534,12 @@ class TRLLifecycleTest(unittest.TestCase):
                 args=training_args,
             )
             sampler = trainer._get_train_sampler()
+            self.assertTrue(
+                any(
+                    callback.__class__.__name__ == "SyncRefModelCallback"
+                    for callback in trainer.callback_handler.callbacks
+                )
+            )
             self.assertEqual(training_args.steps_per_generation, gradient_accumulation_steps)
             self.assertEqual(sampler.mini_repeat_count, 2)
             self.assertEqual(sampler.batch_size, 1)
@@ -562,6 +571,16 @@ class TRLLifecycleTest(unittest.TestCase):
                 result = trainer.train()
 
             self.assertEqual(result.global_step, 1)
+            policy = trainer.accelerator.unwrap_model(trainer.model)
+            reference = trainer.accelerator.unwrap_model(trainer.ref_model)
+            self.assertTrue(
+                all(
+                    torch.equal(policy_parameter, reference_parameter)
+                    for policy_parameter, reference_parameter in zip(
+                        policy.parameters(), reference.parameters()
+                    )
+                )
+            )
             expected_generation_calls = 1 if trainer.accelerator.is_main_process else 0
             self.assertEqual(generate_calls, expected_generation_calls)
             self.assertEqual(

@@ -143,19 +143,48 @@ weights live separately under `output_dir/.../` and normally stay on the server.
 
 ### 2. RL
 
+First run a fixed-reference versus upstream-style periodically synchronized
+reference ablation on Office Products. Both jobs read the same SFT best
+checkpoint: `--run_tag` isolates RL outputs, while `--sft_run_tag` selects the
+shared SFT parent.
+
+Terminal 1 (GPU 0, fixed reference):
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method minionerec_rl \
-  --dataset Video_Games \
-  --run_tag sft6e_lr1e-4_best \
-  2>&1 | tee minionerec_rl_sft6e_lr1e-4_best.log
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_fixed_ref \
+  --baseline_rl_reference_mode fixed \
+  2>&1 | tee minionerec_rl_office_fixed_ref.log
 ```
 
-With this tag, RL initializes from:
+Terminal 2 (GPU 1, synchronize every 512 optimizer steps using
+`ref ← 0.6·policy + 0.4·ref`):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
+  --method minionerec_rl \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_sync_ref \
+  --baseline_rl_reference_mode sync \
+  --baseline_rl_ref_model_sync_steps 512 \
+  --baseline_rl_ref_model_mixup_alpha 0.6 \
+  2>&1 | tee minionerec_rl_office_sync_ref.log
+```
+
+Both jobs initialize from:
 
 ```text
-output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
+output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
+
+Their checkpoints and metrics use separate `seed_42_rl_fixed_ref` and
+`seed_42_rl_sync_ref` directories. The synchronized job's 512/0.6 settings are
+the TRL defaults selected by MiniOneRec's `sync_ref_model=True`; the fixed job
+always computes KL against the initial SFT weights.
 
 Supported methods:
 

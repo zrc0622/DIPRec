@@ -239,6 +239,31 @@ class RunnerContractTest(unittest.TestCase):
             result.stdout,
         )
 
+    def test_rl_reference_ablation_reuses_one_sft_parent_but_separates_outputs(self):
+        common = [
+            "bash", "scripts/run_experiment.sh", "--method", "minionerec_rl",
+            "--dataset", "Office", "--sft_run_tag", "sft6e_lr1e-4_best", "--dry_run",
+        ]
+        fixed = subprocess.run(
+            common + ["--run_tag", "rl_fixed", "--baseline_rl_reference_mode", "fixed"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        synced = subprocess.run(
+            common + ["--run_tag", "rl_sync", "--baseline_rl_reference_mode", "sync"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(fixed.returncode, 0, fixed.stderr)
+        self.assertEqual(synced.returncode, 0, synced.stderr)
+        parent = "minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint"
+        self.assertIn(parent, fixed.stdout)
+        self.assertIn(parent, synced.stdout)
+        self.assertIn("minionerec_rl/seed_42_rl_fixed/final_checkpoint", fixed.stdout)
+        self.assertIn("--reference_mode fixed", fixed.stdout)
+        self.assertIn("minionerec_rl/seed_42_rl_sync/final_checkpoint", synced.stdout)
+        self.assertIn("--reference_mode sync", synced.stdout)
+        self.assertIn("--ref_model_sync_steps 512", synced.stdout)
+        self.assertIn("--ref_model_mixup_alpha 0.6", synced.stdout)
+
     def test_diprec_rl_branches_share_the_same_sft_parent(self):
         script = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
         self.assertIn("diprec_traj_rl|diprec_plan_rl)", script)

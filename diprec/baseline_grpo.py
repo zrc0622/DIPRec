@@ -544,6 +544,20 @@ def train(args: argparse.Namespace) -> None:
         world_size,
         args.num_iterations,
     )
+    if args.reference_mode == "sync":
+        if not 0.0 < args.ref_model_mixup_alpha <= 1.0:
+            raise ValueError("--ref_model_mixup_alpha must be in (0, 1]")
+        if args.ref_model_sync_steps < 1:
+            raise ValueError("--ref_model_sync_steps must be positive")
+    reference_policy = (
+        {
+            "mode": "periodic_sync",
+            "sync_steps": args.ref_model_sync_steps,
+            "mixup_alpha": args.ref_model_mixup_alpha,
+        }
+        if args.reference_mode == "sync"
+        else {"mode": "fixed_sft_checkpoint"}
+    )
     if args.dry_run:
         print(
             json.dumps(
@@ -561,7 +575,7 @@ def train(args: argparse.Namespace) -> None:
                     "generation_mode": "catalog_constrained_beam_sampling",
                     "generation": generation_kwargs,
                     "batch": batch_contract,
-                    "reference_policy": "fixed_sft_checkpoint",
+                    "reference_policy": reference_policy,
                     "use_vllm": False,
                     "train_history": train_history,
                     "valid_history": valid_history,
@@ -630,6 +644,9 @@ def train(args: argparse.Namespace) -> None:
         num_iterations=args.num_iterations,
         loss_type="grpo",
         use_vllm=False,
+        sync_ref_model=args.reference_mode == "sync",
+        ref_model_sync_steps=args.ref_model_sync_steps,
+        ref_model_mixup_alpha=args.ref_model_mixup_alpha,
         seed=args.seed,
     )
     baseline_batch_contract(
@@ -668,7 +685,7 @@ def train(args: argparse.Namespace) -> None:
             "generation_mode": "catalog_constrained_beam_sampling",
             "generation": generation_kwargs,
             "batch": batch_contract,
-            "reference_policy": "fixed_sft_checkpoint",
+            "reference_policy": reference_policy,
             "use_vllm": False,
         }
         Path(args.output_dir, "training_config.json").write_text(
@@ -692,6 +709,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1e-3)
+    parser.add_argument(
+        "--reference_mode",
+        choices=("fixed", "sync"),
+        default="fixed",
+        help="Keep the SFT reference fixed or periodically EMA-sync it from the policy",
+    )
+    parser.add_argument("--ref_model_sync_steps", type=int, default=512)
+    parser.add_argument("--ref_model_mixup_alpha", type=float, default=0.6)
     parser.add_argument("--clip_ratio", type=float, default=0.2)
     parser.add_argument("--num_iterations", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
