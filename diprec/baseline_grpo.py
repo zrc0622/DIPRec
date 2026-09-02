@@ -727,7 +727,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--per_device_batch_size",
         type=int,
-        default=8,
+        default=32,
         help="Optimization micro-batch per GPU; G candidates are formed via generation_batch_size",
     )
     parser.add_argument(
@@ -735,7 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Global TRL generation batch; defaults to the global effective optimizer batch",
     )
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--log_every", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry_run", action="store_true")

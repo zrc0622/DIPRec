@@ -133,8 +133,8 @@ class RunnerContractTest(unittest.TestCase):
                     result.stdout,
                 )
                 self.assertIn("--num_generations 16", result.stdout)
-                self.assertIn("--per_device_batch_size 8", result.stdout)
-                self.assertIn("--gradient_accumulation_steps 2", result.stdout)
+                self.assertIn("--per_device_batch_size 32", result.stdout)
+                self.assertIn("--gradient_accumulation_steps 1", result.stdout)
 
     def test_sft_recipe_controls_and_metrics_file_are_forwarded(self):
         result = subprocess.run(
@@ -204,6 +204,33 @@ class RunnerContractTest(unittest.TestCase):
         )
         self.assertNotIn(
             "output_dir/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e/sft_training_metrics.json",
+            result.stdout,
+        )
+
+    def test_diprec_sft_saves_and_evaluates_the_best_checkpoint(self):
+        result = subprocess.run(
+            [
+                "bash",
+                "scripts/run_experiment.sh",
+                "--method",
+                "diprec_sft",
+                "--dataset",
+                "Office",
+                "--run_tag",
+                "sft6e_lr1e-4_best",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        best = "output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint"
+        self.assertIn(f"--best_output_dir {best}", result.stdout)
+        self.assertIn(f"--model {best}", result.stdout)
+        self.assertIn(
+            "--training_metrics_file outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e-4_best/sft_training_metrics.json",
             result.stdout,
         )
 
