@@ -257,8 +257,8 @@ validation loss；完整的 Recall/NDCG 仍在训练结束后计算。当前仍�
 不会根据 noisy RL validation 指标自动选择 best checkpoint。可用
 `--baseline_rl_eval_steps` 或 `--diprec_rl_eval_steps` 覆盖间隔。
 
-训练期间，TRL 每次正常输出日志时，主进程也会原子更新以下轻量文件；它包含
-train loss、reward、KL、学习率以及周期性 `eval_loss`，不会额外提高终端日志频率：
+训练期间，每次周期验证完成后，主进程会原子更新以下轻量文件；其中只保留
+各次验证的 `eval_loss`、`eval_runtime`、step/epoch 等 eval 结果，不保存逐步训练日志：
 
 ```text
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL方法>/<run_id>/rl_training_metrics.json

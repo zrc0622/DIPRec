@@ -269,9 +269,9 @@ runs after training. The workflow saves and evaluates `final_checkpoint` rather 
 checkpoint from noisy RL validation metrics. Override the interval with
 `--baseline_rl_eval_steps` or `--diprec_rl_eval_steps`.
 
-Whenever TRL emits its normal training log, the main process also atomically
-refreshes a lightweight file containing train loss, rewards, KL, learning rate,
-and periodic `eval_loss`, without increasing terminal logging frequency:
+After each periodic validation, the main process atomically refreshes a
+lightweight file containing only evaluation results such as `eval_loss`,
+`eval_runtime`, step, and epoch. Per-step training logs are not persisted there:
 
 ```text
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL-method>/<run_id>/rl_training_metrics.json

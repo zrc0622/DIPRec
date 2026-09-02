@@ -11,20 +11,26 @@ from transformers import TrainerCallback
 
 
 class PersistentRLTrainingMetricsCallback(TrainerCallback):
-    """Atomically persist Trainer log history whenever TRL emits a log event."""
+    """Atomically persist only periodic evaluation results outside checkpoints."""
 
     def __init__(self, destination: str | Path) -> None:
         self.destination = Path(destination)
+
+    @staticmethod
+    def _evaluations(state: Any) -> list[dict[str, Any]]:
+        return [
+            entry
+            for entry in state.log_history
+            if any(key.startswith("eval_") for key in entry)
+        ]
 
     def _write(self, state: Any, status: str) -> None:
         if not state.is_world_process_zero:
             return
         payload = {
             "status": status,
-            "global_step": state.global_step,
             "max_steps": state.max_steps,
-            "epoch": state.epoch,
-            "log_history": state.log_history,
+            "evaluations": self._evaluations(state),
         }
         self.destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.destination.with_name(
@@ -36,11 +42,10 @@ class PersistentRLTrainingMetricsCallback(TrainerCallback):
         )
         os.replace(temporary, self.destination)
 
-    def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
-        self._write(state, "running")
-
     def on_log(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
-        self._write(state, "running")
+        logs = kwargs.get("logs") or {}
+        if any(key.startswith("eval_") for key in logs):
+            self._write(state, "running")
 
     def on_train_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
         self._write(state, "complete")
