@@ -149,21 +149,20 @@ periodic-sync reference 消融。两组都读取同一个 SFT best checkpoint；
 终端 1（GPU 0，固定 reference）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
   --run_tag rl_fixed_ref \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 8 \
-  --baseline_rl_gradient_accumulation_steps 2 \
-  2>&1 | tee minionerec_rl_office_fixed_ref.log
+  --baseline_rl_gradient_accumulation_steps 2
 ```
 
 终端 2（GPU 1，每 512 optimizer steps 同步一次，`ref ← 0.6·policy + 0.4·ref`）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
+CUDA_VISIBLE_DEVICES=2 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
@@ -172,8 +171,7 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
   --baseline_rl_ref_model_sync_steps 512 \
   --baseline_rl_ref_model_mixup_alpha 0.6 \
   --baseline_rl_per_device_batch_size 8 \
-  --baseline_rl_gradient_accumulation_steps 2 \
-  2>&1 | tee minionerec_rl_office_sync_ref.log
+  --baseline_rl_gradient_accumulation_steps 2
 ```
 
 两组都从以下 SFT checkpoint 初始化：
