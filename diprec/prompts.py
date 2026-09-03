@@ -84,6 +84,19 @@ def plan_prompt(record: Mapping[str, object], max_history_len: int, interest_top
     )
 
 
+def joint_trajectory_prompt(
+    record: Mapping[str, object], max_history_len: int, interest_topk: int
+) -> str:
+    history = ", ".join(_history(record, max_history_len))
+    return (
+        f"The user's chronological item SID history is: {history}. "
+        f"Generate exactly {interest_topk} discrete interest tokens inside <think>...</think>, "
+        "then output exactly one valid three-level item SID. Do not produce natural language. "
+        f"Use the grammar <think>{INTEREST_BEGIN}<INT_xxx>...{INTEREST_END}</think>"
+        "<a_xxx><b_xxx><c_xxx>."
+    )
+
+
 def sid_prompt(
     record: Mapping[str, object],
     plan_tokens: Sequence[str],

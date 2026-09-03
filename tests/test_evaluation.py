@@ -8,7 +8,9 @@ from unittest import mock
 from diprec.data import processed_data_fingerprint, sha256_file
 from diprec.evaluation import (
     _evaluate_record,
+    history_supported_plan,
     unique_top_candidates,
+    unique_plans_with_indices,
     validate_evaluation_checkpoint,
 )
 
@@ -36,6 +38,13 @@ class EvaluationContractTest(unittest.TestCase):
         )
         self.assertEqual(len(candidates), 2)
         self.assertEqual(valid, [True, True])
+
+    def test_plan_dedup_keeps_first_rollout_and_history_support(self):
+        plans = [["<INT_000>"], ["<INT_000>"], ["<INT_001>"]]
+        self.assertEqual(unique_plans_with_indices(plans), ([0, 2], [plans[0], plans[2]]))
+        self.assertTrue(history_supported_plan(["<INT_000>", "<INT_PAD>"], self.record))
+        self.assertFalse(history_supported_plan(["<INT_001>"], self.record))
+        self.assertFalse(history_supported_plan(["<INT_PAD>"], self.record))
 
     def test_diprec_evaluation_uses_fixed_budget_joint_ranking_and_dedup(self):
         try:
@@ -139,6 +148,116 @@ class EvaluationContractTest(unittest.TestCase):
         self.assertEqual(prediction["returned_plan_count"], 1)
         self.assertEqual(prediction["per_plan_candidate_budget"], [8])
         self.assertEqual(metrics["plan_valid_rate"], 0.125)
+
+    def test_activation_sft_evaluation_measures_duplicates_without_reallocating_budget(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        args = argparse.Namespace(
+            method="diprec_sft",
+            sft_objective="interest_activation",
+            max_history_len=50,
+            max_seq_len=2048,
+            interest_topk=1,
+            num_plans=8,
+            eval_candidate_budget=80,
+            eval_beams=3,
+            plan_temperature=1.0,
+            plan_top_p=0.95,
+            plan_sampling_attempts=8,
+            conditioning="history_visible",
+        )
+        sampled = [["<INT_000>"]] * 6 + [["<INT_001>"], ["<INT_000>"]]
+        target = ["<a_1>", "<b_1>", "<c_1>"]
+        with (
+            mock.patch(
+                "diprec.evaluation._sample_plan_rollouts",
+                return_value=([1], [[11]] * 8, sampled),
+            ),
+            mock.patch(
+                "diprec.evaluation._generate_sid_candidates",
+                side_effect=[
+                    ([10], [[100]], [target], [True]),
+                    ([20], [[101]], [["<a_2>", "<b_2>", "<c_2>"]], [True]),
+                ],
+            ) as generate_sid,
+            mock.patch(
+                "diprec.evaluation._sequence_log_probs",
+                side_effect=[
+                    torch.tensor([-0.1]), torch.tensor([-0.2]),
+                    torch.tensor([-0.3]), torch.tensor([-0.4]),
+                ],
+            ),
+        ):
+            prediction, metrics = _evaluate_record(
+                object(), object(), object(), object(), self.record, args
+            )
+        self.assertEqual([call.args[-2] for call in generate_sid.call_args_list], [10, 10])
+        self.assertEqual(prediction["sampled_interest_plans"], sampled)
+        self.assertEqual(prediction["returned_plan_count"], 2)
+        self.assertEqual(prediction["per_plan_candidate_budget"], [10, 10])
+        self.assertAlmostEqual(metrics["plan_duplicate_rate"], 0.75)
+        self.assertEqual(metrics["unique_plans@8"], 2.0)
+        self.assertEqual(metrics["plan_collapse_rate"], 0.0)
+        self.assertAlmostEqual(metrics["plan_history_supported_rate"], 7 / 8)
+
+    def test_joint_activation_continues_sid_in_the_sampled_plan_context(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                self.last_encode = (text, add_special_tokens)
+                if text == "<INT_END></think>":
+                    return [90, 91]
+                raise AssertionError(f"Unexpected encoding request: {text}")
+
+        args = argparse.Namespace(
+            method="diprec_sft",
+            sft_objective="joint_interest_activation",
+            max_history_len=50,
+            max_seq_len=2048,
+            interest_topk=1,
+            num_plans=1,
+            eval_candidate_budget=2,
+            eval_beams=2,
+            plan_temperature=1.0,
+            plan_top_p=0.95,
+            plan_sampling_attempts=8,
+            conditioning="history_visible",
+        )
+        target = ["<a_1>", "<b_1>", "<c_1>"]
+        tokenizer = Tokenizer()
+        with (
+            mock.patch(
+                "diprec.evaluation._sample_plan_rollouts",
+                return_value=([7], [[11]], [["<INT_000>"]]),
+            ) as sample_plans,
+            mock.patch(
+                "diprec.evaluation._generate_catalog_beams",
+                return_value=([[101]], [target], [True]),
+            ) as generate_joint_sid,
+            mock.patch(
+                "diprec.evaluation._generate_sid_candidates"
+            ) as generate_paired_sid,
+            mock.patch(
+                "diprec.evaluation._sequence_log_probs",
+                side_effect=[torch.tensor([-0.1]), torch.tensor([-0.2])],
+            ),
+        ):
+            prediction, metrics = _evaluate_record(
+                object(), tokenizer, object(), object(), self.record, args
+            )
+
+        self.assertTrue(sample_plans.call_args.kwargs["joint_trajectory"])
+        self.assertFalse(generate_paired_sid.called)
+        self.assertEqual(generate_joint_sid.call_args.args[3], [7, 11, 90, 91])
+        self.assertEqual(generate_joint_sid.call_args.args[4], 2)
+        self.assertEqual(prediction["candidate_sid_levels"], [target])
+        self.assertEqual(metrics["Recall@5"], 1.0)
 
     def test_seven_model_checkpoint_contract_rejects_eval_drift(self):
         manifest = {

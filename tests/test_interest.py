@@ -4,8 +4,10 @@ import unittest
 from diprec.interest import (
     TokenRegistry,
     assert_prefix_only_label,
+    interest_activation_plan_pool,
     interest_plans_from_history,
     interest_tokens_from_history,
+    select_interest_activation_plan,
     topk_interest_indices,
 )
 from diprec.prompts import sid_prompt
@@ -82,6 +84,51 @@ class InterestLabelTest(unittest.TestCase):
         self.assertEqual(
             interest_plans_from_history(self.history, 3, "single", 8),
             [["<INT_017>", "<INT_042>", "<INT_PAD>"]],
+        )
+
+    def test_activation_pool_is_compact_deduplicated_and_history_only(self):
+        history = [
+            ["<a_1>", "<b_0>", "<c_0>"],
+            ["<a_1>", "<b_1>", "<c_1>"],
+            ["<a_2>", "<b_2>", "<c_2>"],
+            ["<a_3>", "<b_3>", "<c_3>"],
+            ["<a_4>", "<b_4>", "<c_4>"],
+        ]
+        plans = interest_activation_plan_pool(history, 3, max_plans=8)
+        self.assertEqual(plans[0], ["<INT_001>", "<INT_002>", "<INT_003>"])
+        self.assertLessEqual(len(plans), 8)
+        content = [tuple(sorted(token for token in plan if token != "<INT_PAD>")) for plan in plans]
+        self.assertEqual(len(content), len(set(content)))
+        # Aggregate + recent + four singleton interests: no combinatorial
+        # short-plan expansion merely to force exactly eight labels.
+        self.assertEqual(len(plans), 6)
+
+    def test_activation_pool_does_not_force_multiple_plans_from_one_interest(self):
+        history = [["<a_7>", f"<b_{index}>", "<c_0>"] for index in range(4)]
+        self.assertEqual(
+            interest_activation_plan_pool(history, 3, max_plans=8),
+            [["<INT_007>", "<INT_PAD>", "<INT_PAD>"]],
+        )
+
+    def test_diverse_activation_selection_visits_pool_without_replacement(self):
+        plans = [
+            ["<INT_001>", "<INT_PAD>"],
+            ["<INT_002>", "<INT_PAD>"],
+            ["<INT_003>", "<INT_PAD>"],
+        ]
+        first_cycle = [
+            select_interest_activation_plan(plans, "diverse", epoch, 42, "sample")[0]
+            for epoch in range(len(plans))
+        ]
+        repeated = [
+            select_interest_activation_plan(plans, "diverse", epoch, 42, "sample")[0]
+            for epoch in range(len(plans))
+        ]
+        self.assertEqual(sorted(first_cycle), [0, 1, 2])
+        self.assertEqual(first_cycle, repeated)
+        self.assertEqual(
+            select_interest_activation_plan(plans, "single", 99, 42, "sample"),
+            (0, plans[0]),
         )
 
     def test_strict_bottleneck_hides_history(self):

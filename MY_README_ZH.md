@@ -75,7 +75,7 @@ bash scripts/run_all_comparisons.sh --dry_run
 | `direct_rl` | `direct_sft` | TRL GRPO，采用 MiniOneRec 风格 ranking reward 与 constrained beam sampling |
 | `minionerec_sft` | Qwen | 共享协议下启用的四类 MiniOneRec SFT 任务 |
 | `minionerec_rl` | `minionerec_sft` | 启用的四类 MiniOneRec RL 任务、`G=16`、冻结 reference |
-| `diprec_sft` | `minionerec_sft` | 兴趣 plan SFT + plan 条件 SID SFT |
+| `diprec_sft` | `minionerec_sft` | 历史兴趣激活：plan SFT + history-visible plan 条件 SID SFT |
 | `diprec_traj_rl` | `diprec_sft` | 轨迹级两阶段 TRL 目标 |
 | `diprec_plan_rl` | `diprec_sft` | plan 级与 plan 内 SID 两级 advantage |
 
@@ -140,72 +140,120 @@ outputs/Video_Games/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e
 服务器跑完后，只需下载上面的整个 `outputs/.../seed_42_sft6e_lr1e-4_best/`
 目录供调试；大模型权重单独保存在 `output_dir/.../`，通常留在服务器即可。
 
-### 2. DIPRec-SFT
+### 2. DIPRec-SFT（paired 与联合轨迹对比）
 
-DIPRec-SFT 从同一 run tag 的 MiniOneRec-SFT 最优 checkpoint 继续训练兴趣 plan 与
-plan 条件 SID。若上一节的 checkpoint 已存在且校验通过，runner 会直接复用：
+DIPRec-SFT 从指定的 MiniOneRec-SFT 最优 checkpoint 继续训练。两个实验都
+只根据历史构造同一个精简 plan 池：综合频率 plan、近期 plan
+和若干单兴趣 plan；按兴趣集合去重，历史只能支持几个就保留几个，不为凑满 8 个
+枚举组合。`diverse` 模式每条历史每个 epoch 随机选择一个 plan，以固定 seed
+无放回轮换；validation plan 始终固定。
+
+两者只比较监督轨迹形式：
+
+- `interest_activation` (paired)：每个 epoch 被选中的 plan 产生
+  `history → plan` 和 `history + plan → target SID` 两条序列。
+- `joint_interest_activation` (joint)：每个 epoch 被选中的 plan 只产生一条
+  `history → <think>plan</think>target SID` 联合轨迹，SID 在同一自回归上下文中
+  直接依赖前面生成的 plan。
+
+两者都使用 history-visible，并且都按
+`0.5 × plan_loss + 0.5 × sid_loss` 优化；joint 虽然只有一条序列，仍通过
+token mask 分段计算两项 loss，不让输出长度隐式决定任务权重。
+
+为使每个 optimizer step 看到相同的历史数，paired 用 micro-batch 8
+（即 4 条历史 × 2 条序列），joint 用 micro-batch 4（4 条历史 × 1 条轨迹）。
+建议在两张卡上同时运行：
 
 ```bash
+# GPU 0：paired SFT
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
   --method diprec_sft \
   --dataset Office_Products \
-  --run_tag sft6e_lr1e-4_best \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag interest_activation_plan_diverse \
+  --sft_objective interest_activation \
+  --conditioning history_visible \
+  --sft_plan_mode diverse \
+  --sft_num_plans 8 \
   --sft_num_epochs 6 \
   --sft_micro_batch_size 8 \
   --sft_gradient_accumulation_steps 4 \
   --sft_learning_rate 1e-4
+
+# GPU 1：joint-trajectory SFT
+CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
+  --method diprec_sft \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag joint_interest_activation_plan_diverse \
+  --sft_objective joint_interest_activation \
+  --conditioning history_visible \
+  --sft_plan_mode diverse \
+  --sft_num_plans 8 \
+  --sft_num_epochs 6 \
+  --sft_micro_batch_size 4 \
+  --sft_gradient_accumulation_steps 4 \
+  --sft_learning_rate 1e-4
 ```
 
-DIPRec-SFT 同样在每个 epoch 验证，并按最低 validation loss 保存最优模型：
+DIPRec-SFT 每个 epoch 分别记录 plan 与 SID loss。两个实验都按
+`0.5 × plan_loss + 0.5 × sid_loss`，但按 `valid_sid_loss` 的最低值保存
+最优模型；`valid_plan_loss` 和 `balanced_valid_loss` 仅用于诊断：
 
 ```text
-output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
+output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_interest_activation_plan_diverse/best_checkpoint
+output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_joint_interest_activation_plan_diverse/best_checkpoint
 ```
 
 最后一轮权重保存在相邻的 `final_checkpoint`，逐 epoch loss 写入：
 
 ```text
-outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/seed_42_sft6e_lr1e-4_best/sft_training_metrics.json
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/<run_id>/sft_training_metrics.json
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/<run_id>/plan_pool_statistics.json
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/diprec_sft/<run_id>/sampled_plan_examples.jsonl
 ```
 
-后续 `diprec_traj_rl` 和 `diprec_plan_rl` 会自动使用上述 `best_checkpoint`。
+这里 `<run_id>` 分别是 `seed_42_interest_activation_plan_diverse` 和
+`seed_42_joint_interest_activation_plan_diverse`。生成评测固定采样 8 个 plan，
+允许重复并记录 unique-plan 数、duplicate/collapse
+rate 和 history-supported rate；相同 plan 只执行一次 SID 解码，重复槽位的候选预算
+直接作废，不会奖励坍缩模型。paired 使用第二个 SID prompt；joint
+在同一 `history → plan` 上下文后继续约束解码 SID，与各自的 SFT 格式对齐。
+联合轨迹 RL 本轮尚未实现，runner 会拒绝把 joint checkpoint 静默接入旧的
+两阶段 RL。
+
+两组的 `valid_sid_loss` 只用于各自 run 内选 epoch；由于 paired 和 joint
+的 SID 条件上下文不同，不建议直接横向比较这两个 loss 数值。最终优劣以同一
+validation/test 上的 Recall/NDCG 为主，再结合 unique-plan、duplicate/collapse
+rate 判断是否保持了兴趣多样性。
 
 #### DIPRec 兴趣多样性消融（Office Products）
 
-`single` 完全保留原实现：每条历史只有一个 frequency Top-K plan。`diverse`
-则从同一历史前缀实际出现过的一级兴趣中，确定性构造最多 8 个内容不同的合法
-plan；不会读取目标 item，也不会把同一组 token 的不同排列计作不同 plan。
-多样标签只扩展 plan-generation 任务；SID 监督仍只与原 frequency Top-K 主 plan
-配对，避免把同一 target 强行绑定到所有替代 plan，导致模型忽略 plan。
+`single` 在每个 epoch 都使用 plan 池中的 primary plan；`diverse` 在精简 plan 池中
+按 seed 随机、无放回轮换。两者都严格保持 plan-generation 与 SID-prediction 1:1，
+适合直接做兴趣多样性消融。
 
 ```bash
 # 单一 SFT
 CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_single \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag interest_activation_plan_single \
+  --sft_objective interest_activation --conditioning history_visible \
   --sft_plan_mode single --sft_num_plans 8 \
   --sft_num_epochs 6 --sft_micro_batch_size 8 \
   --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
 
 # 多样性 SFT
 CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best --run_tag plan_diverse \
+  --sft_run_tag sft6e_lr1e-4_best --run_tag interest_activation_plan_diverse \
+  --sft_objective interest_activation --conditioning history_visible \
   --sft_plan_mode diverse --sft_num_plans 8 \
   --sft_num_epochs 6 --sft_micro_batch_size 8 \
   --sft_gradient_accumulation_steps 4 --sft_learning_rate 1e-4
 
-# 单一 SFT 对应的 RL
-CUDA_VISIBLE_DEVICES=2 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_single \
-  --run_tag plan_single_rl --sft_plan_mode single --sft_num_plans 8
-
-# 多样性 SFT 对应的 RL
-CUDA_VISIBLE_DEVICES=3 bash scripts/run_experiment.sh --method diprec_plan_rl --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best --diprec_sft_run_tag plan_diverse \
-  --run_tag plan_diverse_rl --sft_plan_mode diverse --sft_num_plans 8
 ```
 
-两组 RL 的算法和超参数相同，唯一实验变量是父 SFT 的 plan 监督方式。评测均先
-对生成 plan 去重，再按实际唯一 plan 数重新分配固定的 80 个 SID 候选预算。
+旧实验目录（例如 `seed_42_plan_diverse`）不会被覆盖。需要复现旧静态展开实现时，
+显式使用 `--sft_objective legacy` 并指定新的 run tag。
 
 ### 3. RL
 
@@ -324,4 +372,4 @@ python -m unittest discover -s tests -v
 python -m compileall -q diprec scripts tests
 ```
 
-固定 TRL 0.24.0 兼容环境下，当前发现的 79 项测试全部通过。另行执行的两个 RL trainer 完整双进程 CPU DDP 生命周期也均通过；Shell 语法、Python 编译、空白检查，以及 `Video_Games`/`Office_Products` × 七方法 dry-run 同样通过。CUDA kernel、GPU 显存上限和真实数据完整训练仍依赖远端训练机，需要在那里最终验证。
+固定 TRL 0.24.0 兼容环境下，当前发现的 120 项测试全部通过，其中包括 tiny-Qwen 的联合轨迹 SFT 完整单 epoch冒烟训练与 joint plan/SID 梯度检查。两个 RL trainer 的 CPU 生命周期测试也通过；Shell 语法、Python 编译和空白检查均通过。CUDA kernel、GPU 显存上限和真实数据完整训练仍依赖远端训练机，需要在那里最终验证。

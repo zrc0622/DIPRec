@@ -825,7 +825,11 @@ def validate_checkpoint_training_contract(
                 f"Checkpoint {checkpoint} was trained with different item metadata"
             )
     if expected_config:
-        legacy_defaults = {"sft_plan_mode": "single", "sft_num_plans": 8}
+        legacy_defaults = {
+            "sft_objective": "legacy",
+            "sft_plan_mode": "single",
+            "sft_num_plans": 8,
+        }
         mismatches = {
             key: (training.get(key, legacy_defaults.get(key)), expected)
             for key, expected in expected_config.items()

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import random
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import combinations
@@ -57,6 +59,121 @@ def interest_tokens_from_history(
         INTEREST_PAD if index is None else interest_token(index)
         for index in topk_interest_indices(history_sid_levels, k, strategy, time_decay)
     ]
+
+
+def interest_activation_plan_pool(
+    history_sid_levels: Sequence[Sequence[str] | str],
+    k: int,
+    max_plans: int = 8,
+    strategy: str = "frequency",
+    time_decay: float = 0.1,
+) -> list[list[str]]:
+    """Build the compact history-only plan pool used by interest activation.
+
+    Unlike the legacy diverse-label builder, this function does not enumerate
+    arbitrary subsets merely to reach ``max_plans``.  It keeps a configured
+    aggregate plan, a genuinely recent-interest plan when its content differs,
+    and singleton plans for observed interests.  Plans are deduplicated by
+    their non-padding interest *set*, so permutations do not count as new
+    supervision and histories with little evidence naturally return fewer
+    plans.
+    """
+
+    if k < 1:
+        raise ValueError("k must be positive")
+    if max_plans < 1:
+        raise ValueError("max_plans must be positive")
+    if strategy not in {"frequency", "time_decay"}:
+        raise ValueError("strategy must be 'frequency' or 'time_decay'")
+    if time_decay < 0:
+        raise ValueError("time_decay must be non-negative")
+    if not history_sid_levels:
+        raise ValueError("Interest activation requires a non-empty history")
+
+    frequency_scores: dict[int, int] = defaultdict(int)
+    latest: dict[int, int] = {}
+    for position, levels in enumerate(history_sid_levels):
+        index = sid_index(parse_sid_levels(levels)[0])
+        frequency_scores[index] += 1
+        latest[index] = position
+    frequency_ranked = sorted(
+        frequency_scores,
+        key=lambda index: (-frequency_scores[index], index),
+    )
+    recent_ranked = sorted(latest, key=lambda index: (-latest[index], index))
+
+    plans: list[list[str]] = []
+    seen_content: set[tuple[int, ...]] = set()
+
+    def add(indices: Sequence[int | None]) -> None:
+        if len(plans) >= max_plans:
+            return
+        actual = [int(index) for index in indices if index is not None]
+        if not actual:
+            return
+        content_key = tuple(sorted(set(actual)))
+        if content_key in seen_content:
+            return
+        seen_content.add(content_key)
+        # All plan-generation prompts retain the exact-k grammar.  Padding is
+        # used only where a meaningful candidate (not combinatorial filling)
+        # contains fewer than k observed interests.
+        ordered_unique = list(dict.fromkeys(actual))[:k]
+        padded: list[int | None] = ordered_unique + [None] * (k - len(ordered_unique))
+        plans.append(
+            [
+                INTEREST_PAD if index is None else interest_token(index)
+                for index in padded
+            ]
+        )
+
+    # Preserve the configured legacy primary plan as pool index zero.  With
+    # the default frequency strategy this is the aggregate-frequency label;
+    # time-decay ablations retain their former primary label.
+    add(topk_interest_indices(history_sid_levels, k, strategy, time_decay))
+    # Ensure that a frequency aggregate remains represented even in a
+    # time-decay ablation, then add a recent-distinct-interest view.
+    add(frequency_ranked[:k])
+    add(recent_ranked[:k])
+    # Single-interest labels activate each substantial observed region without
+    # manufacturing every possible subset.  Frequency order is deterministic;
+    # recent-only ordering is appended to cover ties before the max-plans cap.
+    for index in [*frequency_ranked, *recent_ranked]:
+        add([index])
+        if len(plans) == max_plans:
+            break
+    return plans
+
+
+def select_interest_activation_plan(
+    plans: Sequence[Sequence[str]],
+    mode: str,
+    epoch: int,
+    seed: int,
+    sample_id: str,
+) -> tuple[int, list[str]]:
+    """Select one plan deterministically for a record and training epoch.
+
+    Diverse mode traverses a seeded shuffle without replacement.  Once every
+    plan has been used, the next cycle is independently reshuffled.  Selection
+    depends only on explicit stable inputs, never Python's randomized hash.
+    """
+
+    if not plans:
+        raise ValueError("plans must not be empty")
+    if epoch < 0:
+        raise ValueError("epoch must be non-negative")
+    if mode == "single":
+        return 0, list(plans[0])
+    if mode != "diverse":
+        raise ValueError("SFT plan mode must be 'single' or 'diverse'")
+    cycle, position = divmod(epoch, len(plans))
+    material = f"{seed}\0{sample_id}\0{cycle}".encode("utf-8")
+    stable_seed = int.from_bytes(hashlib.sha256(material).digest()[:8], "big")
+    order = list(range(len(plans)))
+    random.Random(stable_seed).shuffle(order)
+    selected = order[position]
+    return selected, list(plans[selected])
 
 
 def diverse_interest_plans_from_history(

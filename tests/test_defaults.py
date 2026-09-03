@@ -63,6 +63,7 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "interest_topk": "INTEREST_TOPK",
             "interest_strategy": "INTEREST_STRATEGY",
             "time_decay": "TIME_DECAY",
+            "sft_objective": "SFT_OBJECTIVE",
             "sft_plan_mode": "SFT_PLAN_MODE",
             "sft_num_plans": "SFT_NUM_PLANS",
             "interest_parameterization": "INTEREST_PARAMETERIZATION",
@@ -125,6 +126,7 @@ class DefaultConfigurationContractTest(unittest.TestCase):
             "max_seq_len": (sft, baseline, diprec_rl, evaluation),
             "seed": (sft, baseline, diprec_rl, evaluation),
         }
+        self.assertEqual(sft["sft_objective"], self.config["sft_objective"])
         for key, defaults in expectations.items():
             for values in defaults:
                 with self.subTest(key=key):

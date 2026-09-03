@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .constraints import build_sid_trie, sid_prefix_allowed_fn
+from .constraints import build_sid_trie, interest_prefix_allowed_fn, sid_prefix_allowed_fn
 from .data import (
     joined_sid,
     load_sid_map,
@@ -18,8 +18,12 @@ from .data import (
     validate_checkpoint_training_contract,
     validate_manifest_sid_index,
 )
-from .grpo import _generate_plans, _generate_sid_candidates, _sequence_log_probs
-from .prompts import history_prompt, messages
+from .grpo import (
+    _generate_plans,
+    _generate_sid_candidates,
+    _sequence_log_probs,
+)
+from .prompts import history_prompt, joint_trajectory_prompt, messages, plan_prompt
 from .rewards import aggregate_metric_rows, interest_diversity, ranking_metrics, sid_level_hits
 from .runtime import apply_chat_template, load_model_runtime, set_seed, thinking_prompt_ids
 
@@ -31,6 +35,7 @@ METHOD_ALIASES = {
     "diprec_trajectory_grpo": "diprec_traj_rl",
     "diprec_plan_grpo": "diprec_plan_rl",
 }
+ACTIVATION_SFT_OBJECTIVES = {"interest_activation", "joint_interest_activation"}
 
 
 def canonical_evaluation_method(method: str) -> str:
@@ -85,6 +90,40 @@ def unique_top_candidates(
     return selected, selected_valid
 
 
+def unique_plans_with_indices(
+    plans: Sequence[Sequence[str]],
+) -> tuple[list[int], list[list[str]]]:
+    """Return first-occurrence indices and plans without padding duplicates."""
+
+    indices: list[int] = []
+    unique: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for index, plan in enumerate(plans):
+        key = tuple(plan)
+        if key in seen:
+            continue
+        seen.add(key)
+        indices.append(index)
+        unique.append(list(plan))
+    return indices, unique
+
+
+def history_supported_plan(
+    plan: Sequence[str], record: Mapping[str, Any]
+) -> bool:
+    """Whether every non-padding interest token occurs in the history prefix."""
+
+    observed = set()
+    for levels in record["history_sid_levels"]:
+        level1 = parse_sid_levels(levels)[0]
+        match = re.search(r"\d+", level1)
+        if match is None:
+            raise ValueError(f"Cannot parse interest index from history SID token {level1!r}")
+        observed.add(f"<INT_{int(match.group()):03d}>")
+    non_padding = [token for token in plan if token != "<INT_PAD>"]
+    return bool(non_padding) and all(token in observed for token in non_padding)
+
+
 def validate_evaluation_checkpoint(
     args: argparse.Namespace, manifest: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -108,6 +147,10 @@ def validate_evaluation_checkpoint(
             "conditioning": args.conditioning,
             "interest_parameterization": args.interest_parameterization,
         }
+        if args.method == "diprec_sft":
+            expected_config["sft_objective"] = getattr(
+                args, "sft_objective", "legacy"
+            )
         if args.method in {"diprec_traj_rl", "diprec_plan_rl"}:
             expected_config.update(num_plans=args.num_plans, sid_beams=args.sid_beams)
     return validate_checkpoint_training_contract(
@@ -121,6 +164,80 @@ def validate_evaluation_checkpoint(
 
 def _device(model: Any):
     return next(model.parameters()).device
+
+
+def _sample_plan_rollouts(
+    model: Any,
+    tokenizer: Any,
+    registry: Any,
+    record: Mapping[str, Any],
+    max_history_len: int,
+    interest_topk: int,
+    num_rollouts: int,
+    max_seq_len: int,
+    temperature: float,
+    top_p: float,
+    joint_trajectory: bool = False,
+) -> tuple[list[int], list[list[int]], list[list[str]]]:
+    """Sample exactly N plans for SFT collapse measurement, duplicates included."""
+
+    import torch
+
+    if num_rollouts < 1:
+        raise ValueError("num_rollouts must be positive")
+    prompt_ids = thinking_prompt_ids(
+        tokenizer,
+        messages(
+            joint_trajectory_prompt(record, max_history_len, interest_topk)
+            if joint_trajectory
+            else plan_prompt(record, max_history_len, interest_topk)
+        ),
+    )
+    opening = tokenizer.encode("<INT_BEGIN>", add_special_tokens=False)
+    context = prompt_ids + list(opening)
+    end_think = tokenizer.encode("</think>", add_special_tokens=False)
+    maximum = len(context) + interest_topk + 1 + len(end_think) + 1
+    if maximum > max_seq_len:
+        raise ValueError(
+            f"Plan prompt plus response needs {maximum} tokens (> max_seq_len={max_seq_len})"
+        )
+    allowed = interest_prefix_allowed_fn(
+        registry.interest_token_ids,
+        registry.interest_pad_id,
+        registry.interest_end_id,
+        end_think,
+        len(context),
+        interest_topk,
+        tokenizer.eos_token_id,
+    )
+    batch = torch.tensor([context], dtype=torch.long, device=_device(model))
+    generated = model.generate(
+        input_ids=batch,
+        attention_mask=torch.ones_like(batch),
+        max_new_tokens=interest_topk + 1 + len(end_think) + 1,
+        min_new_tokens=interest_topk + 1 + len(end_think),
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        num_return_sequences=num_rollouts,
+        prefix_allowed_tokens_fn=allowed,
+        pad_token_id=tokenizer.pad_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        use_cache=True,
+    )
+    rollout_ids = [
+        sequence[len(context) : len(context) + interest_topk].tolist()
+        for sequence in generated
+    ]
+    token_lookup = {
+        **dict(zip(registry.interest_token_ids, registry.interest_tokens)),
+        registry.interest_pad_id: "<INT_PAD>",
+    }
+    plans = [
+        [token_lookup[int(token_id)] for token_id in values]
+        for values in rollout_ids
+    ]
+    return context, rollout_ids, plans
 
 
 def _generate_catalog_beams(
@@ -226,6 +343,8 @@ def _evaluate_record(
     import torch
 
     plans: list[list[str]] = []
+    sampled_plans: list[list[str]] = []
+    unique_rollout_indices: list[int] = []
     trajectories: list[str] = []
     ranked_candidates: list[list[str]]
     ranked_valid: list[bool]
@@ -266,35 +385,99 @@ def _evaluate_record(
         elif args.method in DIPREC_METHODS:
             if registry is None:
                 raise AssertionError("DIPRec evaluation requires an interest token registry")
-            plan_context, plan_ids, plans = _generate_plans(
-                model,
-                tokenizer,
-                registry,
-                record,
-                args.max_history_len,
-                args.interest_topk,
-                args.num_plans,
-                args.max_seq_len,
-                args.plan_temperature,
-                args.plan_top_p,
-                args.plan_sampling_attempts,
-                require_full_plan_count=False,
+            activation_sft = (
+                args.method == "diprec_sft"
+                and getattr(args, "sft_objective", "legacy")
+                in ACTIVATION_SFT_OBJECTIVES
             )
-            scored = []
-            plan_budgets = per_plan_candidate_budget(args.eval_candidate_budget, len(plans))
-            for plan_index, (ids, tokens, candidate_budget) in enumerate(zip(plan_ids, plans, plan_budgets)):
-                plan_score = float(_sequence_log_probs(model, plan_context, ids).sum().item())
-                sid_context, sid_ids, candidates, valid = _generate_sid_candidates(
+            joint_activation = (
+                activation_sft
+                and getattr(args, "sft_objective", "legacy")
+                == "joint_interest_activation"
+            )
+            if activation_sft:
+                plan_context, sampled_plan_ids, sampled_plans = _sample_plan_rollouts(
                     model,
                     tokenizer,
-                    trie,
+                    registry,
                     record,
-                    tokens,
                     args.max_history_len,
-                    args.conditioning,
-                    candidate_budget,
+                    args.interest_topk,
+                    args.num_plans,
                     args.max_seq_len,
+                    args.plan_temperature,
+                    args.plan_top_p,
+                    joint_trajectory=joint_activation,
                 )
+                unique_indices, plans = unique_plans_with_indices(sampled_plans)
+                plan_ids = [sampled_plan_ids[index] for index in unique_indices]
+                unique_rollout_indices = unique_indices
+            else:
+                plan_context, plan_ids, plans = _generate_plans(
+                    model,
+                    tokenizer,
+                    registry,
+                    record,
+                    args.max_history_len,
+                    args.interest_topk,
+                    args.num_plans,
+                    args.max_seq_len,
+                    args.plan_temperature,
+                    args.plan_top_p,
+                    args.plan_sampling_attempts,
+                    require_full_plan_count=False,
+                )
+                sampled_plans = list(plans)
+            scored = []
+            # Collapse never earns more SID decoding per surviving plan.  The
+            # fixed requested budget is divided before deduplication; duplicate
+            # slots are intentionally left unused.
+            if activation_sft:
+                requested_budgets = per_plan_candidate_budget(
+                    args.eval_candidate_budget, args.num_plans
+                )
+                plan_budgets = [
+                    requested_budgets[index] for index in unique_rollout_indices
+                ]
+            else:
+                plan_budgets = per_plan_candidate_budget(
+                    args.eval_candidate_budget, len(plans)
+                )
+            for plan_index, (ids, tokens, candidate_budget) in enumerate(zip(plan_ids, plans, plan_budgets)):
+                if joint_activation:
+                    plan_suffix = tokenizer.encode(
+                        "<INT_END></think>", add_special_tokens=False
+                    )
+                    scored_plan_ids = [*ids, *plan_suffix]
+                    plan_score = float(
+                        _sequence_log_probs(
+                            model, plan_context, scored_plan_ids
+                        ).sum().item()
+                    )
+                    sid_context = [*plan_context, *scored_plan_ids]
+                    sid_ids, candidates, valid = _generate_catalog_beams(
+                        model,
+                        tokenizer,
+                        trie,
+                        sid_context,
+                        candidate_budget,
+                        args.max_seq_len,
+                    )
+                else:
+                    plan_score = float(
+                        _sequence_log_probs(model, plan_context, ids).sum().item()
+                    )
+                    sid_context, sid_ids, candidates, valid = _generate_sid_candidates(
+                        model,
+                        tokenizer,
+                        trie,
+                        record,
+                        tokens,
+                        args.max_history_len,
+                        args.conditioning,
+                        candidate_budget,
+                        args.max_seq_len,
+                    )
                 for candidate_index, (candidate_ids, candidate, is_valid) in enumerate(
                     zip(sid_ids, candidates, valid)
                 ):
@@ -330,6 +513,19 @@ def _evaluate_record(
         "sid_valid_rate": sum(ranked_valid) / len(ranked_valid) if ranked_valid else 0.0,
         "interest_diversity": interest_diversity(plans),
         "plan_valid_rate": len(plans) / args.num_plans if plans else 0.0,
+        f"unique_plans@{args.num_plans}": float(len(plans)),
+        "plan_duplicate_rate": (
+            1.0 - len(plans) / len(sampled_plans) if sampled_plans else 0.0
+        ),
+        "plan_collapse_rate": (
+            1.0 if sampled_plans and len(plans) == 1 else 0.0
+        ),
+        "plan_history_supported_rate": (
+            sum(history_supported_plan(plan, record) for plan in sampled_plans)
+            / len(sampled_plans)
+            if sampled_plans
+            else 0.0
+        ),
         "sid_level1_hit": float(best_hits[0]),
         "sid_level2_hit": float(best_hits[1]),
         "sid_level3_hit": float(best_hits[2]),
@@ -341,6 +537,7 @@ def _evaluate_record(
         "candidate_sid_levels": ranked_candidates,
         "candidate_valid": ranked_valid,
         "interest_plans": plans,
+        "sampled_interest_plans": sampled_plans,
         "requested_plan_count": args.num_plans if plans else 0,
         "returned_plan_count": len(plans),
         "trajectories": trajectories,
@@ -426,6 +623,9 @@ def evaluate(args: argparse.Namespace) -> None:
         "time_decay": args.time_decay if is_diprec else None,
         "sft_plan_mode": args.sft_plan_mode if is_diprec else None,
         "sft_num_plans": args.sft_num_plans if is_diprec else 0,
+        "sft_objective": (
+            args.sft_objective if args.method == "diprec_sft" else None
+        ),
         "num_plans": args.num_plans if is_diprec else 0,
         "training_sid_beams": args.sid_beams if args.method in {"diprec_traj_rl", "diprec_plan_rl"} else 0,
         "eval_beams": args.eval_beams,
@@ -502,6 +702,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--interest_strategy", choices=("frequency", "time_decay"), default="frequency"
     )
     parser.add_argument("--time_decay", type=float, default=0.1)
+    parser.add_argument(
+        "--sft_objective",
+        choices=("legacy", "interest_activation", "joint_interest_activation"),
+        default="legacy",
+    )
     parser.add_argument("--sft_plan_mode", choices=("single", "diverse"), default="single")
     parser.add_argument("--sft_num_plans", type=int, default=8)
     parser.add_argument("--num_plans", type=int, default=8)

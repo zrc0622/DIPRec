@@ -23,6 +23,7 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
+SFT_OBJECTIVE="legacy"
 SFT_PLAN_MODE="single"
 SFT_NUM_PLANS=8
 SFT_NUM_EPOCHS=6
@@ -67,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_objective) SFT_OBJECTIVE="$2"; shift 2 ;;
     --sft_plan_mode) SFT_PLAN_MODE="$2"; shift 2 ;;
     --sft_num_plans) SFT_NUM_PLANS="$2"; shift 2 ;;
     --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
@@ -120,6 +122,7 @@ for dataset in "${DATASETS[@]}"; do
         --interest_parameterization "$INTEREST_PARAMETERIZATION"
         --interest_strategy "$INTEREST_STRATEGY"
         --time_decay "$TIME_DECAY"
+        --sft_objective "$SFT_OBJECTIVE"
         --sft_plan_mode "$SFT_PLAN_MODE"
         --sft_num_plans "$SFT_NUM_PLANS"
         --eval_beams "$EVAL_BEAMS"

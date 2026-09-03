@@ -386,6 +386,41 @@ class LongHistoryDataTest(unittest.TestCase):
                     expected_config={"max_history_len": 10},
                 )
 
+    def test_legacy_checkpoint_cannot_satisfy_activation_objective(self):
+        manifest = {
+            "schema_version": "diprec.long_history.v1",
+            "dataset": "Video_Games",
+            "source_kind": "sidreasoner_official_csv_reconstruction",
+            "source_sha256": {"train": "a", "valid": "b", "test": "c"},
+            "sid_index_sha256": "d",
+            "split_strategy": "official_temporal",
+            "max_history_len": 50,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            (checkpoint / "training_config.json").write_text(
+                json.dumps(
+                    {
+                        "method": "diprec_sft",
+                        "data_manifest": processed_data_fingerprint(manifest),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            validate_checkpoint_training_contract(
+                checkpoint,
+                expected_method="diprec_sft",
+                manifest=manifest,
+                expected_config={"sft_objective": "legacy"},
+            )
+            with self.assertRaisesRegex(ValueError, "sft_objective"):
+                validate_checkpoint_training_contract(
+                    checkpoint,
+                    expected_method="diprec_sft",
+                    manifest=manifest,
+                    expected_config={"sft_objective": "interest_activation"},
+                )
+
     def test_validation_predictions_do_not_overwrite_test_predictions(self):
         metrics = Path("outputs/run/metrics.json")
         self.assertEqual(prediction_output_path(metrics, "test"), Path("outputs/run/predictions.jsonl"))

@@ -27,6 +27,7 @@ CONDITIONING="interest_bottleneck"
 INTEREST_PARAMETERIZATION="independent_head"
 INTEREST_STRATEGY="frequency"
 TIME_DECAY=0.1
+SFT_OBJECTIVE="legacy"
 SFT_PLAN_MODE="single"
 SFT_NUM_PLANS=8
 SFT_NUM_EPOCHS=6
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --interest_parameterization) INTEREST_PARAMETERIZATION="$2"; shift 2 ;;
     --interest_strategy) INTEREST_STRATEGY="$2"; shift 2 ;;
     --time_decay) TIME_DECAY="$2"; shift 2 ;;
+    --sft_objective) SFT_OBJECTIVE="$2"; shift 2 ;;
     --sft_plan_mode) SFT_PLAN_MODE="$2"; shift 2 ;;
     --sft_num_plans) SFT_NUM_PLANS="$2"; shift 2 ;;
     --sft_num_epochs) SFT_NUM_EPOCHS="$2"; shift 2 ;;
@@ -129,6 +131,14 @@ case "$SFT_PLAN_MODE" in
   single|diverse) ;;
   *) echo "--sft_plan_mode must be single or diverse" >&2; exit 2 ;;
 esac
+case "$SFT_OBJECTIVE" in
+  legacy|interest_activation|joint_interest_activation) ;;
+  *) echo "--sft_objective must be legacy, interest_activation, or joint_interest_activation" >&2; exit 2 ;;
+esac
+if [[ "$SFT_OBJECTIVE" != "legacy" && "$CONDITIONING" != "history_visible" ]]; then
+  echo "--sft_objective $SFT_OBJECTIVE requires --conditioning history_visible" >&2
+  exit 2
+fi
 if ! [[ "$SFT_NUM_PLANS" =~ ^[1-9][0-9]*$ ]]; then
   echo "--sft_num_plans must be a positive integer" >&2
   exit 2
@@ -148,6 +158,10 @@ case "$METHOD" in
   direct_sft|direct_rl|minionerec_sft|minionerec_rl|diprec_sft|diprec_traj_rl|diprec_plan_rl) ;;
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
+if [[ "$SFT_OBJECTIVE" == "joint_interest_activation" && ( "$METHOD" == "diprec_traj_rl" || "$METHOD" == "diprec_plan_rl" ) ]]; then
+  echo "--sft_objective joint_interest_activation currently supports diprec_sft only; joint-trajectory RL will be added separately" >&2
+  exit 2
+fi
 case "$MAX_HISTORY_LEN" in 10|20|50) ;; *) echo "--max_history_len must be 10, 20, or 50" >&2; exit 2 ;; esac
 case "$DATA_SOURCE" in official|raw) ;; *) echo "--data_source must be official or raw" >&2; exit 2 ;; esac
 if [[ -n "$RAW_PATH" ]]; then DATA_SOURCE="raw"; fi
@@ -300,11 +314,15 @@ checkpoint_ready() {
   if [[ "$expected_method" == "diprec_sft" && "$INTEREST_PARAMETERIZATION" == "independent_head" ]]; then
     [[ -f "$checkpoint/diprec_adapter_config.json" && -f "$checkpoint/diprec_interest_adapter.pt" ]] || return 1
   fi
-  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10],"sft_plan_mode":sys.argv[11],"sft_num_plans":int(sys.argv[12])}) if sys.argv[3]=="diprec_sft" else None; defaults={"sft_plan_mode":"single","sft_num_plans":8}; config_ok=all(training.get(k,defaults.get(k))==v for k,v in expected.items()); ok=training.get("checkpoint_role")=="best_validation" and training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION" "$SFT_PLAN_MODE" "$SFT_NUM_PLANS"
+  python3 -c 'import json,sys; from diprec.data import processed_data_fingerprint,sha256_file; training=json.load(open(sys.argv[1])); manifest=json.load(open(sys.argv[2])); item=sys.argv[5]; item_ok=training.get("item_meta_sha256")==sha256_file(item) if item else training.get("item_meta_sha256") is None; expected={}; expected.update({"interest_topk":int(sys.argv[6]),"interest_strategy":sys.argv[7],"time_decay":float(sys.argv[8]),"conditioning":sys.argv[9],"interest_parameterization":sys.argv[10],"sft_plan_mode":sys.argv[11],"sft_num_plans":int(sys.argv[12]),"sft_objective":sys.argv[13]}) if sys.argv[3]=="diprec_sft" else None; defaults={"sft_objective":"legacy","sft_plan_mode":"single","sft_num_plans":8}; config_ok=all(training.get(k,defaults.get(k))==v for k,v in expected.items()); ok=training.get("checkpoint_role")=="best_validation" and training.get("data_manifest")==processed_data_fingerprint(manifest) and training.get("method")==sys.argv[3] and training.get("model")==sys.argv[4] and item_ok and config_ok; raise SystemExit(0 if ok else 1)' "$checkpoint/training_config.json" "$DATA_DIR/manifest.json" "$expected_method" "$expected_parent" "$expected_item_meta" "$INTEREST_TOPK" "$INTEREST_STRATEGY" "$TIME_DECAY" "$CONDITIONING" "$INTEREST_PARAMETERIZATION" "$SFT_PLAN_MODE" "$SFT_NUM_PLANS" "$SFT_OBJECTIVE"
 }
 
 run_sft() {
   local sft_method="$1" source_model="$2" destination="$3"
+  local sft_objective="legacy"
+  if [[ "$sft_method" == "diprec_sft" ]]; then
+    sft_objective="$SFT_OBJECTIVE"
+  fi
   local best_destination="$(dirname "$destination")/best_checkpoint"
   local sft_checkpoint_run_id="$(basename "$(dirname "$destination")")"
   local sft_debug_dir="outputs/$DATASET/$DATA_VARIANT/$MODEL_SLUG/$sft_method/$sft_checkpoint_run_id"
@@ -323,6 +341,7 @@ run_sft() {
     --interest_topk "$INTEREST_TOPK"
     --interest_strategy "$INTEREST_STRATEGY"
     --time_decay "$TIME_DECAY"
+    --sft_objective "$sft_objective"
     --sft_plan_mode "$SFT_PLAN_MODE"
     --sft_num_plans "$SFT_NUM_PLANS"
     --conditioning "$CONDITIONING"
@@ -476,6 +495,7 @@ EVAL_CMD=(bash scripts/eval_diprec.sh
   --interest_topk "$INTEREST_TOPK"
   --interest_strategy "$INTEREST_STRATEGY"
   --time_decay "$TIME_DECAY"
+  --sft_objective "$SFT_OBJECTIVE"
   --sft_plan_mode "$SFT_PLAN_MODE"
   --sft_num_plans "$SFT_NUM_PLANS"
   --num_plans "$NUM_PLANS"

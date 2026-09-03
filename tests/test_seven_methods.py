@@ -13,7 +13,18 @@ from diprec.baseline_grpo import (
 )
 from diprec.data import load_item_metadata, resolve_item_metadata
 from diprec.prompts import history_prompt
-from diprec.sft import catalog_alignment_maps, encode_catalog_sft_records, encode_sft_records
+from diprec.sft import (
+    InterestActivationCollator,
+    InterestActivationDataset,
+    JointInterestActivationCollator,
+    JointInterestActivationDataset,
+    _causal_stage_losses,
+    _checkpoint_selection_loss,
+    _training_config,
+    catalog_alignment_maps,
+    encode_catalog_sft_records,
+    encode_sft_records,
+)
 
 
 class FakeTokenizer:
@@ -137,6 +148,205 @@ class SevenMethodDataContractTest(unittest.TestCase):
         self.assertEqual([row["stage"] for row in rows].count("interest_plan"), 4)
         self.assertEqual([row["stage"] for row in rows].count("sid_prediction"), 1)
         self.assertEqual({row["plan_count"] for row in rows}, {4})
+
+    def test_interest_activation_pairs_one_plan_and_sid_task_per_history(self):
+        dataset = InterestActivationDataset(
+            [self.record],
+            FakeTokenizer(),
+            max_history_len=50,
+            max_seq_len=4096,
+            interest_topk=3,
+            interest_strategy="frequency",
+            time_decay=0.1,
+            sft_plan_mode="diverse",
+            sft_num_plans=8,
+            seed=42,
+            rotate=True,
+        )
+        pair = dataset[0]
+        self.assertEqual(set(pair), {"plan", "sid"})
+        self.assertEqual(pair["plan"]["stage"], "interest_plan")
+        self.assertEqual(pair["sid"]["stage"], "sid_prediction")
+        self.assertEqual(pair["plan"]["interest_tokens"], pair["sid"]["interest_tokens"])
+        self.assertEqual(pair["sid"]["sft_objective"], "interest_activation")
+
+    def test_activation_mixed_batch_and_stage_losses_are_balanced(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        dataset = InterestActivationDataset(
+            [self.record, self.record | {"sample_id": "second"}],
+            FakeTokenizer(),
+            max_history_len=50,
+            max_seq_len=4096,
+            interest_topk=3,
+            interest_strategy="frequency",
+            time_decay=0.1,
+            sft_plan_mode="single",
+            sft_num_plans=8,
+            seed=42,
+            rotate=True,
+        )
+        batch = InterestActivationCollator(0)([dataset[0], dataset[1]])
+        self.assertEqual(batch["input_ids"].shape[0], 4)
+        self.assertEqual(batch["stage_ids"].tolist(), [0, 0, 1, 1])
+        vocabulary = 101
+        logits = torch.zeros(
+            (*batch["input_ids"].shape, vocabulary), dtype=torch.float32
+        )
+        plan_loss, sid_loss, plan_tokens, sid_tokens = _causal_stage_losses(
+            logits, batch["labels"], batch["stage_ids"]
+        )
+        self.assertAlmostEqual(plan_loss.item(), __import__("math").log(vocabulary), places=5)
+        self.assertAlmostEqual(sid_loss.item(), __import__("math").log(vocabulary), places=5)
+        self.assertGreater(plan_tokens, 0)
+        self.assertGreater(sid_tokens, 0)
+
+    def test_joint_activation_is_one_plan_then_sid_trajectory(self):
+        dataset = JointInterestActivationDataset(
+            [self.record],
+            FakeTokenizer(),
+            max_history_len=50,
+            max_seq_len=4096,
+            interest_topk=3,
+            interest_strategy="frequency",
+            time_decay=0.1,
+            sft_plan_mode="diverse",
+            sft_num_plans=8,
+            seed=42,
+            rotate=True,
+        )
+        row = dataset[0]
+        self.assertEqual(row["stage"], "joint_plan_sid_trajectory")
+        self.assertEqual(row["sft_objective"], "joint_interest_activation")
+        supervised_stages = [
+            stage
+            for label, stage in zip(row["labels"], row["token_stage_ids"])
+            if label != -100
+        ]
+        self.assertIn(0, supervised_stages)
+        self.assertIn(1, supervised_stages)
+        self.assertLess(supervised_stages.index(0), supervised_stages.index(1))
+        self.assertNotIn(0, supervised_stages[supervised_stages.index(1) :])
+
+    def test_joint_activation_collator_supports_segment_weighted_loss(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        dataset = JointInterestActivationDataset(
+            [self.record, self.record | {"sample_id": "second"}],
+            FakeTokenizer(),
+            max_history_len=50,
+            max_seq_len=4096,
+            interest_topk=3,
+            interest_strategy="frequency",
+            time_decay=0.1,
+            sft_plan_mode="single",
+            sft_num_plans=8,
+            seed=42,
+            rotate=True,
+        )
+        batch = JointInterestActivationCollator(0)([dataset[0], dataset[1]])
+        self.assertEqual(batch["input_ids"].shape[0], 2)
+        self.assertEqual(batch["stage_ids"].shape, batch["labels"].shape)
+        vocabulary = 101
+        logits = torch.zeros(
+            (*batch["input_ids"].shape, vocabulary), dtype=torch.float32
+        )
+        plan_loss, sid_loss, plan_tokens, sid_tokens = _causal_stage_losses(
+            logits, batch["labels"], batch["stage_ids"]
+        )
+        self.assertAlmostEqual(plan_loss.item(), __import__("math").log(vocabulary), places=5)
+        self.assertAlmostEqual(sid_loss.item(), __import__("math").log(vocabulary), places=5)
+        self.assertGreater(plan_tokens, 0)
+        self.assertGreater(sid_tokens, 0)
+
+    def test_activation_validation_plan_is_fixed_across_epochs(self):
+        record = dict(self.record)
+        record["history_sid_levels"] = [
+            [f"<a_{index}>", f"<b_{index}>", f"<c_{index}>"]
+            for index in range(5)
+        ]
+        record["history_item_sid"] = [
+            f"<a_{index}><b_{index}><c_{index}>" for index in range(5)
+        ]
+        record["history_len"] = 5
+        dataset = InterestActivationDataset(
+            [record],
+            FakeTokenizer(),
+            max_history_len=50,
+            max_seq_len=4096,
+            interest_topk=3,
+            interest_strategy="frequency",
+            time_decay=0.1,
+            sft_plan_mode="diverse",
+            sft_num_plans=8,
+            seed=42,
+            rotate=False,
+        )
+        selected = []
+        for epoch in range(6):
+            dataset.set_epoch(epoch)
+            selected.append(dataset.selected_plan(0))
+        self.assertEqual(len(set((index, tuple(plan)) for index, plan in selected)), 1)
+
+    def test_activation_checkpoint_selection_uses_sid_loss(self):
+        # A worse balanced loss must not hide an improved SID predictor.
+        self.assertEqual(
+            _checkpoint_selection_loss(
+                True, validation_loss=3.0, valid_sid_loss=1.25
+            ),
+            1.25,
+        )
+        # Legacy DIPRec/MiniOneRec behavior remains aggregate validation loss.
+        self.assertEqual(
+            _checkpoint_selection_loss(
+                False, validation_loss=2.0, valid_sid_loss=0.5
+            ),
+            2.0,
+        )
+
+    def test_activation_checkpoint_selection_requires_sid_loss(self):
+        with self.assertRaisesRegex(ValueError, "valid_sid_loss is required"):
+            _checkpoint_selection_loss(True, validation_loss=2.0)
+
+    def test_activation_checkpoint_config_names_sid_metric(self):
+        from argparse import Namespace
+
+        config = _training_config(
+            Namespace(
+                item_meta=None,
+                sft_objective="interest_activation",
+            ),
+            "diprec_sft",
+            {},
+            {},
+            {},
+            checkpoint_role="best_validation",
+            selected_epoch=2,
+            selected_validation_loss=1.25,
+        )
+        self.assertEqual(config["checkpoint_selection_metric"], "valid_sid_loss")
+        self.assertEqual(config["selected_validation_loss"], 1.25)
+
+        joint_config = _training_config(
+            Namespace(
+                item_meta=None,
+                sft_objective="joint_interest_activation",
+            ),
+            "diprec_sft",
+            {},
+            {},
+            {},
+            checkpoint_role="best_validation",
+            selected_epoch=3,
+            selected_validation_loss=1.0,
+        )
+        self.assertEqual(
+            joint_config["checkpoint_selection_metric"], "valid_sid_loss"
+        )
 
     def test_minionerec_rl_matches_enabled_official_tasks(self):
         rows, counts = build_baseline_rl_rows(

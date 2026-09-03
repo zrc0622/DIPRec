@@ -255,6 +255,105 @@ class RunnerContractTest(unittest.TestCase):
                 self.assertIn("--sft_num_plans 8", result.stdout)
                 self.assertIn(f"diprec_sft/seed_42_plan_{mode}", result.stdout)
 
+    def test_interest_activation_sft_uses_isolated_directory_and_contract(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "diprec_sft",
+                "--dataset", "Office",
+                "--sft_run_tag", "sft6e_lr1e-4_best",
+                "--run_tag", "interest_activation_plan_diverse",
+                "--sft_objective", "interest_activation",
+                "--conditioning", "history_visible",
+                "--sft_plan_mode", "diverse",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = "diprec_sft/seed_42_interest_activation_plan_diverse"
+        self.assertIn(f"output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/{run}/best_checkpoint", result.stdout)
+        self.assertIn(f"outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/{run}/sft_training_metrics.json", result.stdout)
+        self.assertIn("--sft_objective interest_activation", result.stdout)
+        self.assertIn("--conditioning history_visible", result.stdout)
+
+    def test_interest_activation_rejects_hidden_history(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "diprec_sft", "--dataset", "Office",
+                "--sft_objective", "interest_activation", "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires --conditioning history_visible", result.stderr)
+
+    def test_joint_interest_activation_has_isolated_command_and_directory(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "diprec_sft",
+                "--dataset", "Office",
+                "--sft_run_tag", "sft6e_lr1e-4_best",
+                "--run_tag", "joint_interest_activation_plan_diverse",
+                "--sft_objective", "joint_interest_activation",
+                "--conditioning", "history_visible",
+                "--sft_plan_mode", "diverse",
+                "--sft_micro_batch_size", "4",
+                "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = "diprec_sft/seed_42_joint_interest_activation_plan_diverse"
+        self.assertIn(
+            f"output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/{run}/best_checkpoint",
+            result.stdout,
+        )
+        self.assertIn("--sft_objective joint_interest_activation", result.stdout)
+        self.assertIn("--micro_batch_size 4", result.stdout)
+
+    def test_joint_interest_activation_rejects_hidden_history(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "diprec_sft", "--dataset", "Office",
+                "--sft_objective", "joint_interest_activation", "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("requires --conditioning history_visible", result.stderr)
+
+    def test_joint_interest_activation_is_not_silently_used_by_two_stage_rl(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "diprec_plan_rl", "--dataset", "Office",
+                "--sft_objective", "joint_interest_activation",
+                "--conditioning", "history_visible", "--dry_run",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("joint-trajectory RL will be added separately", result.stderr)
+
     def test_diprec_rl_selects_single_or_diverse_sft_parent(self):
         for mode in ("single", "diverse"):
             with self.subTest(mode=mode):
