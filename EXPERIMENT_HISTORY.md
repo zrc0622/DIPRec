@@ -266,7 +266,7 @@ group、2 epochs、55,290 optimizer steps。每组完成 10 次 validation eval�
 | `seed_42_rl_fixed_ref` | 0.22483 | 0.16728 | 0.12766 | -0.00370 |
 | `seed_42_rl_sync_ref` | 0.20304 | 0.14550 | 0.10432 | -0.02548 |
 
-## 8. 已启动但尚未完成：四卡大 batch fixed-reference RL
+## 8. 已修复、待重新运行：四卡大 batch fixed-reference RL
 
 这就是当前所称的“实验 3”。目标是保持其他条件不变，将每次 optimizer update
 包含的完整 GRPO group 从单卡实验的 2 组增加到 32 组，以检验旧 RL 退化是否
@@ -294,15 +294,16 @@ bash scripts/run_experiment.sh \
 
 实际根因是 rank 0 在 constrained beam search 的模型前向中 CUDA OOM：GPU 0
 共有 44.39 GiB，当时进程已使用 41.78 GiB，继续申请 1.50 GiB 失败。这不是
-NCCL、batch 整除或 optimizer/backward 错误。当前 replicated-DDP 实现会收集
-所有 rank 的 prompt，再只由 rank 0 执行生成；因此四卡只分摊训练前向/反向，
-不会自动分摊 rollout。原配置每次让 rank 0 生成 8 个独立 prompt，每个 prompt
-展开 16 个 beam。
+NCCL、batch 整除或 optimizer/backward 错误。旧 replicated-DDP 实现会收集
+所有 rank 的 prompt，再只由 rank 0 执行生成；因此旧代码中 rank 0 一次承担
+全局 512 个 candidate（32 个独立 prompt × 16 beams），其他三卡不执行生成。
 
-### 8.2 修正后待运行：micro-batch 8，accumulation 16
+### 8.2 代码修复后待运行：rank-local、micro-batch 32、accumulation 4
 
-修正配置降低每次集中生成的峰值显存，同时保持有效 batch、学习率、数据、奖励、
-reference policy 和总 epoch 不变。使用新 run tag，避免与失败目录混合：
+代码已将 Direct/MiniOneRec-RL 改为与官方 MiniOneRec 默认 non-vLLM 路径一致的
+rank-local rollout：每个 rank 只生成自己的完整 GRPO group，之后仍由 TRL 跨 rank
+汇总 reward 并归一化。恢复原来更快的 micro-batch 32、accumulation 4，并使用
+新 run tag，避免与失败目录混合：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -313,30 +314,31 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
+  --run_tag rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 8 \
-  --baseline_rl_gradient_accumulation_steps 16 \
+  --baseline_rl_per_device_batch_size 32 \
+  --baseline_rl_gradient_accumulation_steps 4 \
   --baseline_rl_generation_batch_size 512
 ```
 
-两次配置的实验含义相同：
+修复前后的全局实验含义不变：
 
 ```text
-失败配置：4 GPUs x 32 candidates/GPU x  4 accumulation = 512 candidates/update
-修正配置：4 GPUs x  8 candidates/GPU x 16 accumulation = 512 candidates/update
-共同设置：512 / G=16 = 32 complete GRPO prompt groups/update
+4 GPUs × 32 candidates/GPU × 4 accumulation = 512 candidates/update
+512 / G=16 = 32 complete GRPO prompt groups/update
+旧代码：rank 0 生成 512 candidates，其他 rank 生成 0
+新代码：每个 rank 生成 512 / 4 = 128 candidates（8 个完整 group）
 ```
 
-修正配置将一次集中 rollout 从 128 个 candidate（8 个独立 prompt）降到 32 个
-candidate（2 个独立 prompt），预计显著降低 rank 0 峰值显存；代价是调用和累积
-次数增加，wall-clock 可能更慢。`expandable_segments` 只用于缓解显存碎片，真正
-解决峰值问题的是 micro-batch 从 32 降到 8。
+曾考虑用 micro-batch 8、accumulation 16 保持全局 batch 512，但 TRL 会一次生成
+整个 accumulation rollout，所以该配置每个 rank 仍生成 128 个 candidate，并不
+降低生成峰值，反而增加 micro-step。若 rank-local 后每卡 128 个 candidate 仍 OOM，
+应降低全局 generation/effective batch，而不是只交换 micro-batch 与累积步数。
 
 预期新目录：
 
 ```text
-outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16/
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4/
 ```
 
 ## 9. 证据完整性

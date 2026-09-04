@@ -104,7 +104,12 @@ For replicated multi-GPU training, prefix the same commands with the launcher co
 DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 bash scripts/run_all_comparisons.sh
 ```
 
-Use an Accelerate configuration with ordinary multi-GPU DDP. The custom centralized rollouts reject DeepSpeed, FSDP, and tensor parallelism during trainer initialization because rank zero alone generates and then broadcasts candidates; each rank therefore needs a complete model replica.
+Use an Accelerate configuration with ordinary multi-GPU DDP. Direct-RL and
+MiniOneRec-RL follow upstream MiniOneRec's default non-vLLM behavior: every
+rank generates its own local prompt groups, after which TRL gathers rewards for
+global GRPO normalization. DIPRec's two-stage RL rollout is still centralized
+on rank zero. Both custom paths require a complete model replica on every rank,
+so trainer initialization rejects DeepSpeed, FSDP, and tensor parallelism.
 
 Before a non-dry-run dependency or evaluation loads model weights, it checks the canonical method, processed-data fingerprint (including the SID index), and (where applicable) item-metadata checksum. DIPRec parent reuse and evaluation additionally check the interest label strategy/top-k/time-decay, conditioning, and parameterization; RL evaluation also checks the training plan/beam shape. A mismatch fails fast instead of silently reusing a stale checkpoint. Result JSON keeps immutable `training_config` separate from the current `evaluation_config`.
 
@@ -216,14 +221,11 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 ### 3. RL
 
 Run experiment 3 first: a four-GPU MiniOneRec-RL fixed-reference job on Office
-Products using GPUs 0--3. The initial micro-batch-32/accumulation-4 attempt
-failed at `0/3454`: rank 0 had 41.78/44.39 GiB in use and OOMed while requesting
-another 1.50 GiB during the first constrained beam rollout. This implementation
-gathers prompts from every rank and performs generation only on rank 0, so DDP
-does not distribute rollout memory across the four GPUs.
-
-Use micro-batch 8 and accumulation 16 instead. This reduces each centralized
-generation call while preserving the effective candidate batch of 512:
+Products using GPUs 0--3. The original implementation failed at `0/3454`
+because it gathered the complete global rollout onto rank 0; that process had
+41.78/44.39 GiB in use and OOMed while requesting another 1.50 GiB. The trainer
+now uses rank-local generation, matching upstream MiniOneRec's default non-vLLM
+path. Restore the faster micro-batch-32/accumulation-4 configuration:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -234,26 +236,29 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
+  --run_tag rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 8 \
-  --baseline_rl_gradient_accumulation_steps 16 \
+  --baseline_rl_per_device_batch_size 32 \
+  --baseline_rl_gradient_accumulation_steps 4 \
   --baseline_rl_generation_batch_size 512
 ```
 
 This gives:
 
 ```text
-4 GPUs x 8 candidates/GPU x 16 accumulation steps = 512 candidates/update
+4 GPUs x 32 candidates/GPU x 4 accumulation steps = 512 candidates/update
 512 / 16 generations = 32 complete GRPO prompt groups/update
+Each rank generates 512 / 4 = 128 candidates = 8 complete groups/rollout
 ```
 
-The failed setup generated 128 candidates (8 unique prompts) at once on rank 0;
-the corrected setup generates 32 candidates (2 unique prompts) at once. The
-data, learning rate, reward, fixed reference, number of epochs, and effective
-batch are unchanged. More accumulation steps may make the corrected job slower.
-`expandable_segments` only mitigates allocator fragmentation; the smaller
-micro-batch is the actual peak-memory fix.
+Before this code fix, rank 0 generated all 512 candidates (32 unique prompts)
+while the other ranks generated none. It now generates only its local 128
+candidates (8 prompts), as do the other three ranks. TRL constructs the whole
+accumulation rollout before generation, so changing to micro-batch 8 and
+accumulation 16 would still generate 128 candidates per rank and would merely
+add slower micro-steps. If 128 local candidates still exceed one GPU, reduce
+the global generation/effective batch (for example, batch 32, accumulation 2,
+generation batch 256); that is a different effective-batch experiment.
 
 The job initializes from:
 
@@ -262,7 +267,7 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 Its checkpoint and metrics use the new
-`seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16` directory, so neither the earlier
+`seed_42_rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4` directory, so neither the earlier
 single-GPU run nor the failed four-GPU directory is mixed with this run.
 
 Only after experiment 3 establishes the large-batch fixed-reference result
@@ -335,7 +340,7 @@ bash scripts/run_all_comparisons.sh \
 
 Common options: `--max_history_len 10|20|50`, `--model Qwen/Qwen3-1.7B`, and `--conditioning history_visible|interest_bottleneck`. Use `--run_tag sft6e_lr1e-4_best` to keep a retrain separate from existing checkpoints; SFT refuses to overwrite either `best_checkpoint` or `final_checkpoint`. SFT controls are `--sft_num_epochs`, `--sft_micro_batch_size`, `--sft_gradient_accumulation_steps`, `--sft_learning_rate`, `--sft_weight_decay`, and `--sft_warmup_ratio`.
 
-RL batch controls: `--baseline_rl_per_device_batch_size`, `--baseline_rl_generation_batch_size`, `--baseline_rl_gradient_accumulation_steps`, plus the analogous `--diprec_rl_*` options. Leave generation batch unset to derive it safely. If set explicitly, it must contain complete `num_generations`/`num_plans` groups and equal the global effective update batch. TRL consequently derives `steps_per_generation = gradient_accumulation_steps`. Internally, its sampler uses `repeat_count = num_iterations × steps_per_generation`: the `steps_per_generation` factor feeds all micro-step slices, while `num_iterations` determines how many optimizer updates reuse the rollout. Keep DIPRec `num_iterations >= 2`, so the same rollout drives two optimizer updates and PPO clipping is active on the reused update.
+RL batch controls: `--baseline_rl_per_device_batch_size`, `--baseline_rl_generation_batch_size`, `--baseline_rl_gradient_accumulation_steps`, plus the analogous `--diprec_rl_*` options. Leave generation batch unset to derive it safely. If set explicitly, it must contain complete `num_generations`/`num_plans` groups and equal the global effective update batch. For Direct/MiniOneRec-RL, both the global generation batch and its per-rank share must be divisible by `num_generations`; this ensures every rank owns complete GRPO groups. TRL consequently derives `steps_per_generation = gradient_accumulation_steps`. Internally, its sampler uses `repeat_count = num_iterations × steps_per_generation`: the `steps_per_generation` factor feeds all micro-step slices, while `num_iterations` determines how many optimizer updates reuse the rollout. Keep DIPRec `num_iterations >= 2`, so the same rollout drives two optimizer updates and PPO clipping is active on the reused update.
 
 ## 9. Run checks
 

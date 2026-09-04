@@ -431,10 +431,12 @@ class SevenMethodDataContractTest(unittest.TestCase):
     def test_small_micro_batch_still_forms_one_complete_grpo_group(self):
         contract = baseline_batch_contract(16, 1, 16, 16, 1)
         self.assertEqual(contract["global_micro_batch"], 1)
+        self.assertEqual(contract["local_generation_batch"], 16)
         self.assertEqual(contract["generation_batch_size"], 16)
         self.assertEqual(contract["steps_per_generation"], 16)
         self.assertEqual(contract["effective_update_batch"], 16)
         self.assertEqual(contract["unique_prompts_per_generation"], 1)
+        self.assertEqual(contract["local_unique_prompts_per_generation"], 1)
         self.assertEqual(contract["optimizer_updates_per_rollout"], 1)
         self.assertEqual(contract["sampler_repeat_count"], 16)
         with self.assertRaisesRegex(ValueError, "generation_batch_size"):
@@ -444,14 +446,25 @@ class SevenMethodDataContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "steps_per_generation"):
             baseline_batch_contract(4, 1, 4, 4, 1, steps_per_generation=2)
 
-    def test_two_rank_batch_contract_places_one_duplicate_on_each_rank(self):
-        contract = baseline_batch_contract(2, 1, 2, 1, 2, num_iterations=2)
+    def test_multi_rank_batch_contract_keeps_complete_groups_on_each_rank(self):
+        with self.assertRaisesRegex(ValueError, "every rank generates complete"):
+            baseline_batch_contract(2, 1, 2, 1, 2, num_iterations=2)
+        contract = baseline_batch_contract(2, 1, 4, 2, 2, num_iterations=2)
         self.assertEqual(contract["global_micro_batch"], 2)
-        self.assertEqual(contract["steps_per_generation"], 1)
-        self.assertEqual(contract["effective_update_batch"], 2)
-        self.assertEqual(contract["unique_prompts_per_generation"], 1)
+        self.assertEqual(contract["local_generation_batch"], 2)
+        self.assertEqual(contract["steps_per_generation"], 2)
+        self.assertEqual(contract["effective_update_batch"], 4)
+        self.assertEqual(contract["unique_prompts_per_generation"], 2)
+        self.assertEqual(contract["local_unique_prompts_per_generation"], 1)
         self.assertEqual(contract["optimizer_updates_per_rollout"], 2)
-        self.assertEqual(contract["sampler_repeat_count"], 2)
+        self.assertEqual(contract["sampler_repeat_count"], 4)
+
+        recommended = baseline_batch_contract(16, 32, 512, 4, 4)
+        self.assertEqual(recommended["effective_update_batch"], 512)
+        self.assertEqual(recommended["local_generation_batch"], 128)
+        self.assertEqual(recommended["unique_prompts_per_generation"], 32)
+        self.assertEqual(recommended["local_unique_prompts_per_generation"], 8)
+        self.assertEqual(recommended["steps_per_generation"], 4)
 
     def test_direct_and_minionerec_rl_share_the_evaluation_history_prompt(self):
         direct, _ = build_baseline_rl_rows(

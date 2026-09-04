@@ -92,6 +92,12 @@ def baseline_batch_contract(
             "generation_batch_size must be divisible by "
             "per_device_batch_size * world_size"
         )
+    local_generation_batch = generation_batch_size // world_size
+    if local_generation_batch % num_generations:
+        raise ValueError(
+            "generation_batch_size / world_size must be divisible by num_generations "
+            "so every rank generates complete GRPO prompt groups"
+        )
     inferred_steps = generation_batch_size // global_micro_batch
     if steps_per_generation is not None and steps_per_generation != inferred_steps:
         raise ValueError(
@@ -112,9 +118,11 @@ def baseline_batch_contract(
     return {
         **values,
         "global_micro_batch": global_micro_batch,
+        "local_generation_batch": local_generation_batch,
         "steps_per_generation": steps_per_generation,
         "effective_update_batch": effective_update_batch,
         "unique_prompts_per_generation": generation_batch_size // num_generations,
+        "local_unique_prompts_per_generation": local_generation_batch // num_generations,
         "optimizer_updates_per_rollout": num_iterations,
         "sampler_repeat_count": num_iterations * steps_per_generation,
     }
@@ -377,101 +385,91 @@ def _catalog_trainer_class(base_class: type):
 
         def _generate_single_turn(self, prompts: list[str], images: list[Any] | None):
             import torch
-            from accelerate.utils import broadcast_object_list, gather_object
 
             if images is not None:
                 raise ValueError("Catalog SID generation does not support image prompts")
             group_size = self.num_generations
-            all_prompts = gather_object(prompts)
-            if not isinstance(all_prompts, list):
-                all_prompts = list(all_prompts)
-            if len(all_prompts) % group_size:
+            if len(prompts) % group_size:
                 raise ValueError(
-                    f"Global prompt batch {len(all_prompts)} is not divisible by "
-                    f"num_generations={group_size}"
+                    f"Local prompt batch {len(prompts)} on rank "
+                    f"{self.accelerator.process_index} is not divisible by "
+                    f"num_generations={group_size}; each rank must receive complete groups"
                 )
             unique_prompts: list[str] = []
-            for start in range(0, len(all_prompts), group_size):
-                group = all_prompts[start : start + group_size]
+            for start in range(0, len(prompts), group_size):
+                group = prompts[start : start + group_size]
                 if any(prompt != group[0] for prompt in group[1:]):
-                    raise ValueError("TRL sampler did not produce contiguous repeated prompt groups")
+                    raise ValueError(
+                        "TRL sampler did not produce contiguous repeated prompt groups "
+                        f"within rank {self.accelerator.process_index}"
+                    )
                 unique_prompts.append(group[0])
 
             tokenizer = self.processing_class
-            payload = None
             from trl.models import unwrap_model_for_generation
 
-            # Every rank enters the context so ordinary DDP stays synchronized;
-            # only rank zero performs the expensive generation below.
+            # Match upstream MiniOneRec's non-vLLM path: every DDP rank owns a
+            # complete policy replica and generates only its local prompt groups.
+            # TRL gathers rewards after generation, so group normalization remains
+            # global without concentrating rollout memory on rank zero.
             with unwrap_model_for_generation(
                 self.model_wrapped, self.accelerator
             ) as unwrapped_model:
-                if self.accelerator.is_main_process:
-                    encode_kwargs: dict[str, Any] = {
-                        "text": unique_prompts,
-                        "return_tensors": "pt",
-                        "padding": True,
-                        "padding_side": "left",
-                        "truncation": True,
-                        "add_special_tokens": False,
-                    }
-                    if self.max_prompt_length is not None:
-                        encode_kwargs["max_length"] = self.max_prompt_length
-                    encoded = tokenizer(**encode_kwargs)
-                    encoded = {
-                        key: value.to(self.accelerator.device)
-                        for key, value in encoded.items()
-                    }
-                    prompt_width = int(encoded["input_ids"].shape[1])
-                    allowed = sid_prefix_allowed_fn(
-                        self.sid_trie, prompt_width, int(tokenizer.eos_token_id)
-                    )
-                    was_training = unwrapped_model.training
-                    unwrapped_model.eval()
-                    try:
-                        with torch.no_grad():
-                            generation_kwargs = catalog_training_generation_kwargs(
-                                group_size, self.temperature
-                            )
-                            generated = unwrapped_model.generate(
-                                **encoded,
-                                max_new_tokens=4,
-                                min_new_tokens=3,
-                                early_stopping=True,
-                                length_penalty=0.0,
-                                prefix_allowed_tokens_fn=allowed,
-                                pad_token_id=tokenizer.pad_token_id,
-                                eos_token_id=tokenizer.eos_token_id,
-                                use_cache=True,
-                                **generation_kwargs,
-                            )
-                    finally:
-                        if was_training:
-                            unwrapped_model.train()
+                encode_kwargs: dict[str, Any] = {
+                    "text": unique_prompts,
+                    "return_tensors": "pt",
+                    "padding": True,
+                    "padding_side": "left",
+                    "truncation": True,
+                    "add_special_tokens": False,
+                }
+                if self.max_prompt_length is not None:
+                    encode_kwargs["max_length"] = self.max_prompt_length
+                encoded = tokenizer(**encode_kwargs)
+                encoded = {
+                    key: value.to(self.accelerator.device)
+                    for key, value in encoded.items()
+                }
+                prompt_width = int(encoded["input_ids"].shape[1])
+                allowed = sid_prefix_allowed_fn(
+                    self.sid_trie, prompt_width, int(tokenizer.eos_token_id)
+                )
+                was_training = unwrapped_model.training
+                unwrapped_model.eval()
+                try:
+                    with torch.no_grad():
+                        generation_kwargs = catalog_training_generation_kwargs(
+                            group_size, self.temperature
+                        )
+                        generated = unwrapped_model.generate(
+                            **encoded,
+                            max_new_tokens=4,
+                            min_new_tokens=3,
+                            early_stopping=True,
+                            length_penalty=0.0,
+                            prefix_allowed_tokens_fn=allowed,
+                            pad_token_id=tokenizer.pad_token_id,
+                            eos_token_id=tokenizer.eos_token_id,
+                            use_cache=True,
+                            **generation_kwargs,
+                        )
+                finally:
+                    if was_training:
+                        unwrapped_model.train()
 
-                    all_prompt_ids: list[list[int]] = []
-                    all_completion_ids: list[list[int]] = []
-                    for prompt_index, attention_mask in enumerate(encoded["attention_mask"]):
-                        retained_prompt = encoded["input_ids"][prompt_index][attention_mask.bool()].tolist()
-                        for beam_index in range(group_size):
-                            output_index = prompt_index * group_size + beam_index
-                            continuation = generated[output_index, prompt_width:].tolist()
-                            if tokenizer.eos_token_id in continuation:
-                                eos = continuation.index(tokenizer.eos_token_id)
-                                continuation = continuation[: eos + 1]
-                            all_prompt_ids.append([int(value) for value in retained_prompt])
-                            all_completion_ids.append([int(value) for value in continuation])
-                    payload = (all_prompt_ids, all_completion_ids)
-            values = [payload]
-            broadcast_object_list(values, from_process=0)
-            all_prompt_ids, all_completion_ids = values[0]
-            local_count = len(prompts)
-            counts = gather_object([local_count])
-            if not isinstance(counts, list):
-                counts = list(counts)
-            start = sum(int(value) for value in counts[: self.accelerator.process_index])
-            stop = start + local_count
-            return all_prompt_ids[start:stop], all_completion_ids[start:stop], None, {}
+            prompt_ids: list[list[int]] = []
+            completion_ids: list[list[int]] = []
+            for prompt_index, attention_mask in enumerate(encoded["attention_mask"]):
+                retained_prompt = encoded["input_ids"][prompt_index][attention_mask.bool()].tolist()
+                for beam_index in range(group_size):
+                    output_index = prompt_index * group_size + beam_index
+                    continuation = generated[output_index, prompt_width:].tolist()
+                    if tokenizer.eos_token_id in continuation:
+                        eos = continuation.index(tokenizer.eos_token_id)
+                        continuation = continuation[: eos + 1]
+                    prompt_ids.append([int(value) for value in retained_prompt])
+                    completion_ids.append([int(value) for value in continuation])
+            return prompt_ids, completion_ids, None, {}
 
     return CatalogGRPOTrainer
 
@@ -564,7 +562,7 @@ def train(args: argparse.Namespace) -> None:
             json.dumps(
                 {
                     "method": method,
-                    "trainer": "trl.GRPOTrainer@0.24.0 + catalog beam-sampling override",
+                    "trainer": "trl.GRPOTrainer@0.24.0 + rank-local catalog beam-sampling override",
                     "model": args.model,
                     "train_samples": len(train_rows),
                     "valid_samples": len(valid_rows),
@@ -574,6 +572,7 @@ def train(args: argparse.Namespace) -> None:
                     "item_metadata": len(item_metadata) if item_metadata is not None else 0,
                     "num_generations": args.num_generations,
                     "generation_mode": "catalog_constrained_beam_sampling",
+                    "generation_distribution": "rank_local",
                     "generation": generation_kwargs,
                     "batch": batch_contract,
                     "reference_policy": reference_policy,
@@ -679,7 +678,7 @@ def train(args: argparse.Namespace) -> None:
         tokenizer.save_pretrained(args.output_dir)
         config = vars(args) | {
             "method": method,
-            "trainer": "trl.GRPOTrainer@0.24.0 + catalog beam-sampling override",
+            "trainer": "trl.GRPOTrainer@0.24.0 + rank-local catalog beam-sampling override",
             "task_counts": task_counts,
             "valid_task_counts": valid_task_counts,
             "train_history": train_history,
@@ -687,6 +686,7 @@ def train(args: argparse.Namespace) -> None:
             "data_manifest": processed_data_fingerprint(manifest),
             "item_meta_sha256": sha256_file(args.item_meta) if args.item_meta else None,
             "generation_mode": "catalog_constrained_beam_sampling",
+            "generation_distribution": "rank_local",
             "generation": generation_kwargs,
             "batch": batch_contract,
             "reference_policy": reference_policy,

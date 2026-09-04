@@ -104,7 +104,11 @@ outputs/$DATASET/history_50/Qwen_Qwen3-0.6B/$METHOD/seed_42/
 DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 bash scripts/run_all_comparisons.sh
 ```
 
-Accelerate 配置必须使用普通 multi-GPU DDP。自定义集中式 rollout 只在 rank 0 生成候选后广播，因此每个 rank 都必须持有完整模型；trainer 初始化时会明确拒绝 DeepSpeed、FSDP 和 tensor parallelism。
+Accelerate 配置必须使用普通 multi-GPU DDP。Direct-RL 和 MiniOneRec-RL
+现已对齐官方 MiniOneRec 默认的 non-vLLM 路径：每个 rank 独立生成本地 prompt
+group，之后仍由 TRL 跨 rank 汇总 reward 并做全局 GRPO 归一化。DIPRec 两阶段
+RL 的 rollout 目前仍集中在 rank 0。两类自定义路径都要求每个 rank 持有完整模型，
+因此 trainer 初始化时会明确拒绝 DeepSpeed、FSDP 和 tensor parallelism。
 
 非 dry-run 的依赖训练或评测在加载模型权重前，会校验 canonical method、processed-data 指纹（其中包含 SID index），以及需要时的 item-metadata 校验和；DIPRec 父 checkpoint 复用与评测还会校验兴趣标签策略/top-k/time-decay、conditioning 和 parameterization，RL 评测另校验训练时的 plan/beam 形状。任何不匹配都会立即失败，不会静默复用陈旧 checkpoint。结果 JSON 将不可变的 `training_config` 与本次 `evaluation_config` 分开保存。
 
@@ -258,13 +262,11 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 ### 3. RL
 
 当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
-MiniOneRec-RL fixed-reference 实验。第一次采用 micro-batch 32、梯度累积 4，
-但在第一个 rollout、进度 `0/3454` 时失败：rank 0 已占用 41.78/44.39 GiB，
-constrained beam generation 继续申请 1.50 GiB 时 OOM。当前实现会收集所有 rank
-的 prompt，并且只在 rank 0 上生成，因此 DDP 不会把 rollout 显存分摊到四张卡。
-
-修正后使用 micro-batch 8、梯度累积 16：降低每次集中生成的峰值显存，同时仍将
-有效 candidate batch 保持为 512。
+MiniOneRec-RL fixed-reference 实验。旧实现第一次采用 micro-batch 32、梯度累积
+4，在第一个 rollout、进度 `0/3454` 时失败：它把全局 rollout 汇集到 rank 0，
+导致该进程已占用 41.78/44.39 GiB，继续申请 1.50 GiB 时 OOM。现在代码已改为
+每个 rank 本地生成，与官方 MiniOneRec 默认 non-vLLM 路径一致，因此恢复更快的
+micro-batch 32、梯度累积 4：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -275,25 +277,27 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
+  --run_tag rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 8 \
-  --baseline_rl_gradient_accumulation_steps 16 \
+  --baseline_rl_per_device_batch_size 32 \
+  --baseline_rl_gradient_accumulation_steps 4 \
   --baseline_rl_generation_batch_size 512
 ```
 
 该配置满足：
 
 ```text
-4 GPUs × 8 candidates/GPU × 16 accumulation steps = 512 candidates/update
+4 GPUs × 32 candidates/GPU × 4 accumulation steps = 512 candidates/update
 512 / 16 generations = 32 complete GRPO prompt groups/update
+每个 rank 生成 512 / 4 = 128 candidates = 8 个完整 group
 ```
 
-失败配置一次在 rank 0 上生成 128 个 candidate（8 个独立 prompt），修正配置降为
-32 个 candidate（2 个独立 prompt）。训练数据、学习率、奖励、fixed reference、
-epoch 数及有效 batch 都没有变化，所以仍然是在验证“大有效 batch 是否缓解热门
-召回器”；更多累积步骤可能使 wall-clock 变慢。`expandable_segments` 只缓解显存
-碎片，真正降低峰值的是 micro-batch 从 32 降到 8。
+修复前由 rank 0 一次生成全部 512 个 candidate（32 个独立 prompt），其他 rank
+不生成；修复后四张卡分别生成本地 128 个 candidate（8 个 prompt）。TRL 会先组成
+整个 accumulation rollout 再调用生成，因此改成 micro-batch 8、累积 16 时，每卡
+仍会一次生成 128 个 candidate，只会增加较慢的 micro-step，不能进一步降低生成
+峰值。若每卡 128 个 candidate 仍然 OOM，必须降低全局 generation/effective batch，
+例如 batch 32、累积 2、generation batch 256；这会变成另一组有效 batch 实验。
 
 它从以下 SFT checkpoint 初始化：
 
@@ -302,7 +306,7 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 RL checkpoint 和指标写入新的
-`seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16` 目录，既不会覆盖之前的单卡
+`seed_42_rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4` 目录，既不会覆盖之前的单卡
 `seed_42_rl_fixed_ref`，也不会与本次失败的四卡目录混合。
 
 实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
@@ -370,7 +374,7 @@ bash scripts/run_all_comparisons.sh \
 
 常用参数：`--max_history_len 10|20|50`、`--model Qwen/Qwen3-1.7B`、`--conditioning history_visible|interest_bottleneck`。用 `--run_tag sft6e_lr1e-4_best` 可以让重训与旧 checkpoint 隔离；SFT 不会覆盖已有的 `best_checkpoint` 或 `final_checkpoint`。SFT 参数包括 `--sft_num_epochs`、`--sft_micro_batch_size`、`--sft_gradient_accumulation_steps`、`--sft_learning_rate`、`--sft_weight_decay`、`--sft_warmup_ratio`。
 
-RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，以及对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
+RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，以及对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。对于 Direct/MiniOneRec-RL，全局 generation batch 及其每个 rank 的份额还都必须能被 `num_generations` 整除，以保证每张卡拿到完整 GRPO group。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
 
 ## 9. 运行检查
 

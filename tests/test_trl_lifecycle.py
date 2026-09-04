@@ -467,8 +467,8 @@ class TRLLifecycleTest(unittest.TestCase):
         from diprec.runtime import load_model_runtime
 
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        if world_size not in (1, 2):
-            self.skipTest(f"lifecycle fixture supports world sizes 1 and 2, found {world_size}")
+        if world_size not in (1, 2, 4):
+            self.skipTest(f"lifecycle fixture supports world sizes 1, 2, and 4, found {world_size}")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -520,13 +520,13 @@ class TRLLifecycleTest(unittest.TestCase):
                 str(sft), sid_map, "disjoint_rows", training=True, include_interest=False
             )
 
-            gradient_accumulation_steps = 2 // world_size
+            gradient_accumulation_steps = 1
             training_args = GRPOConfig(
                 output_dir=str(root / "output"),
-                per_device_train_batch_size=1,
+                per_device_train_batch_size=2,
                 gradient_accumulation_steps=gradient_accumulation_steps,
                 num_generations=2,
-                generation_batch_size=2,
+                generation_batch_size=2 * world_size,
                 num_iterations=1,
                 max_prompt_length=96,
                 max_completion_length=4,
@@ -549,7 +549,10 @@ class TRLLifecycleTest(unittest.TestCase):
                 sid_trie=build_sid_trie(tokenizer, sid_map),
                 reward_funcs=[exact_match_reward, make_rank_aware_reward(2)],
                 train_dataset=Dataset.from_list(
-                    [{"prompt": "history", "target_sid": target, "sample_id": "0"}]
+                    [
+                        {"prompt": "history", "target_sid": target, "sample_id": str(index)}
+                        for index in range(world_size)
+                    ]
                 ),
                 args=training_args,
             )
@@ -562,7 +565,7 @@ class TRLLifecycleTest(unittest.TestCase):
             )
             self.assertEqual(training_args.steps_per_generation, gradient_accumulation_steps)
             self.assertEqual(sampler.mini_repeat_count, 2)
-            self.assertEqual(sampler.batch_size, 1)
+            self.assertEqual(sampler.batch_size, world_size)
             self.assertEqual(
                 sampler.repeat_count,
                 training_args.num_iterations * training_args.steps_per_generation,
@@ -601,10 +604,10 @@ class TRLLifecycleTest(unittest.TestCase):
                     )
                 )
             )
-            expected_generation_calls = 1 if trainer.accelerator.is_main_process else 0
-            self.assertEqual(generate_calls, expected_generation_calls)
+            self.assertEqual(generate_calls, 1)
             self.assertEqual(
-                list(trainer._logs["rewards"]["exact_match_reward"]), [1.0, 0.0]
+                list(trainer._logs["rewards"]["exact_match_reward"]),
+                [1.0, 0.0] * world_size,
             )
             if world_size == 1:
                 with mock.patch.object(type(model), "generate", new=fake_generate):
@@ -617,12 +620,13 @@ class TRLLifecycleTest(unittest.TestCase):
             if world_size == 2:
                 import torch.distributed as dist
 
-                local_advantage = float(
-                    trainer._buffered_inputs[0]["advantages"][0].item()
+                local_advantages = sorted(
+                    float(value) for value in trainer._buffered_inputs[0]["advantages"]
                 )
-                gathered: list[float | None] = [None, None]
-                dist.all_gather_object(gathered, local_advantage)
-                self.assertGreater(gathered[0], gathered[1])
+                gathered: list[list[float] | None] = [None, None]
+                dist.all_gather_object(gathered, local_advantages)
+                self.assertEqual(gathered[0], gathered[1])
+                self.assertLess(gathered[0][0], gathered[0][1])
 
 
 if __name__ == "__main__":

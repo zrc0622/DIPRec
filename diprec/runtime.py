@@ -28,7 +28,7 @@ def get_active_interest_router() -> InterestParameterRouter | None:
 
 
 def require_replicated_generation_backend(trainer: Any, component: str) -> None:
-    """Reject sharded model backends used by main-rank-only generation."""
+    """Reject sharded backends when custom generation needs full model replicas."""
 
     unsupported = []
     if getattr(trainer, "is_deepspeed_enabled", False):
@@ -40,9 +40,8 @@ def require_replicated_generation_backend(trainer: Any, component: str) -> None:
     if unsupported:
         backends = "/".join(unsupported)
         raise RuntimeError(
-            f"{component} uses centralized generation and requires a complete policy replica "
-            f"on every rank; {backends} is not supported. Use single-process training or "
-            "ordinary replicated DDP."
+            f"{component} requires a complete policy replica on every rank; {backends} is "
+            "not supported. Use single-process training or ordinary replicated DDP."
         )
 
 
