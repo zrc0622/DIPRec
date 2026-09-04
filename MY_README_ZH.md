@@ -258,30 +258,42 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 ### 3. RL
 
 当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
-MiniOneRec-RL fixed-reference 实验。每卡仍使用已经验证可容纳的 micro-batch
-32，通过 4 卡和梯度累积 4 将有效 candidate batch 扩大到 512：
+MiniOneRec-RL fixed-reference 实验。第一次采用 micro-batch 32、梯度累积 4，
+但在第一个 rollout、进度 `0/3454` 时失败：rank 0 已占用 41.78/44.39 GiB，
+constrained beam generation 继续申请 1.50 GiB 时 OOM。当前实现会收集所有 rank
+的 prompt，并且只在 rank 0 上生成，因此 DDP 不会把 rollout 显存分摊到四张卡。
+
+修正后使用 micro-batch 8、梯度累积 16：降低每次集中生成的峰值显存，同时仍将
+有效 candidate batch 保持为 512。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512 \
+  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 16 \
   --baseline_rl_generation_batch_size 512
 ```
 
 该配置满足：
 
 ```text
-4 GPUs × 32 candidates/GPU × 4 accumulation steps = 512 candidates/update
+4 GPUs × 8 candidates/GPU × 16 accumulation steps = 512 candidates/update
 512 / 16 generations = 32 complete GRPO prompt groups/update
 ```
+
+失败配置一次在 rank 0 上生成 128 个 candidate（8 个独立 prompt），修正配置降为
+32 个 candidate（2 个独立 prompt）。训练数据、学习率、奖励、fixed reference、
+epoch 数及有效 batch 都没有变化，所以仍然是在验证“大有效 batch 是否缓解热门
+召回器”；更多累积步骤可能使 wall-clock 变慢。`expandable_segments` 只缓解显存
+碎片，真正降低峰值的是 micro-batch 从 32 降到 8。
 
 它从以下 SFT checkpoint 初始化：
 
@@ -289,10 +301,9 @@ bash scripts/run_experiment.sh \
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-RL checkpoint 和指标写入新的 `seed_42_rl_fixed_ref_4gpu_eb512` 目录，不会覆盖
-之前的 `seed_42_rl_fixed_ref`。这里保持每卡 batch 32，是因为单卡该配置实测约占
-22 GB；不先把每卡 batch 提到 64。若首次 rollout 仍然 OOM，可保持有效 batch
-不变，改成每卡 batch 16、梯度累积 8，并继续显式设置 generation batch 512。
+RL checkpoint 和指标写入新的
+`seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16` 目录，既不会覆盖之前的单卡
+`seed_42_rl_fixed_ref`，也不会与本次失败的四卡目录混合。
 
 实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
 periodic-sync 对照；不要同时占用这四张卡启动第二个任务。

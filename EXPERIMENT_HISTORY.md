@@ -266,10 +266,16 @@ group、2 epochs、55,290 optimizer steps。每组完成 10 次 validation eval�
 | `seed_42_rl_fixed_ref` | 0.22483 | 0.16728 | 0.12766 | -0.00370 |
 | `seed_42_rl_sync_ref` | 0.20304 | 0.14550 | 0.10432 | -0.02548 |
 
-## 8. 已确定、尚未完成：四卡大 batch fixed-reference RL
+## 8. 已启动但尚未完成：四卡大 batch fixed-reference RL
 
-这就是当前所称的“实验 3”。截至本文更新时间还没有 `metrics.json`，不能计入
-已完成结果；命令已经通过 `--dry_run` 参数检查。
+这就是当前所称的“实验 3”。目标是保持其他条件不变，将每次 optimizer update
+包含的完整 GRPO group 从单卡实验的 2 组增加到 32 组，以检验旧 RL 退化是否
+主要来自有效奖励信号过少。
+
+### 8.1 第一次启动：rank 0 rollout OOM
+
+2026-09-04 首次使用下列配置启动；训练在第一个 rollout、进度 `0/3454` 时失败，
+没有产生可计入结果表的 `metrics.json`：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -286,14 +292,51 @@ bash scripts/run_experiment.sh \
   --baseline_rl_generation_batch_size 512
 ```
 
-批量关系：`4 GPUs x 32 candidates/GPU x 4 accumulation = 512 candidates/update`
-，即每次更新 32 个完整的 `G=16` prompt group。目标是检验旧 RL 退化是否主要
-来自每次更新只有两个 group、有效奖励信号过少。
+实际根因是 rank 0 在 constrained beam search 的模型前向中 CUDA OOM：GPU 0
+共有 44.39 GiB，当时进程已使用 41.78 GiB，继续申请 1.50 GiB 失败。这不是
+NCCL、batch 整除或 optimizer/backward 错误。当前 replicated-DDP 实现会收集
+所有 rank 的 prompt，再只由 rank 0 执行生成；因此四卡只分摊训练前向/反向，
+不会自动分摊 rollout。原配置每次让 rank 0 生成 8 个独立 prompt，每个 prompt
+展开 16 个 beam。
+
+### 8.2 修正后待运行：micro-batch 8，accumulation 16
+
+修正配置降低每次集中生成的峰值显存，同时保持有效 batch、学习率、数据、奖励、
+reference policy 和总 epoch 不变。使用新 run tag，避免与失败目录混合：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+DIPREC_DDP=1 \
+DIPREC_NUM_PROCESSES=4 \
+bash scripts/run_experiment.sh \
+  --method minionerec_rl \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
+  --baseline_rl_reference_mode fixed \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 16 \
+  --baseline_rl_generation_batch_size 512
+```
+
+两次配置的实验含义相同：
+
+```text
+失败配置：4 GPUs x 32 candidates/GPU x  4 accumulation = 512 candidates/update
+修正配置：4 GPUs x  8 candidates/GPU x 16 accumulation = 512 candidates/update
+共同设置：512 / G=16 = 32 complete GRPO prompt groups/update
+```
+
+修正配置将一次集中 rollout 从 128 个 candidate（8 个独立 prompt）降到 32 个
+candidate（2 个独立 prompt），预计显著降低 rank 0 峰值显存；代价是调用和累积
+次数增加，wall-clock 可能更慢。`expandable_segments` 只用于缓解显存碎片，真正
+解决峰值问题的是 micro-batch 从 32 降到 8。
 
 预期新目录：
 
 ```text
-outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb512/
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16/
 ```
 
 ## 9. 证据完整性

@@ -216,31 +216,44 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 ### 3. RL
 
 Run experiment 3 first: a four-GPU MiniOneRec-RL fixed-reference job on Office
-Products using GPUs 0--3. Keep the already-tested per-device micro-batch at 32
-and use four gradient-accumulation steps to raise the effective candidate batch
-to 512:
+Products using GPUs 0--3. The initial micro-batch-32/accumulation-4 attempt
+failed at `0/3454`: rank 0 had 41.78/44.39 GiB in use and OOMed while requesting
+another 1.50 GiB during the first constrained beam rollout. This implementation
+gathers prompts from every rank and performs generation only on rank 0, so DDP
+does not distribute rollout memory across the four GPUs.
+
+Use micro-batch 8 and accumulation 16 instead. This reduces each centralized
+generation call while preserving the effective candidate batch of 512:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512 \
+  --run_tag rl_fixed_ref_4gpu_eb512_mb8_ga16 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_per_device_batch_size 8 \
+  --baseline_rl_gradient_accumulation_steps 16 \
   --baseline_rl_generation_batch_size 512
 ```
 
 This gives:
 
 ```text
-4 GPUs x 32 candidates/GPU x 4 accumulation steps = 512 candidates/update
+4 GPUs x 8 candidates/GPU x 16 accumulation steps = 512 candidates/update
 512 / 16 generations = 32 complete GRPO prompt groups/update
 ```
+
+The failed setup generated 128 candidates (8 unique prompts) at once on rank 0;
+the corrected setup generates 32 candidates (2 unique prompts) at once. The
+data, learning rate, reward, fixed reference, number of epochs, and effective
+batch are unchanged. More accumulation steps may make the corrected job slower.
+`expandable_segments` only mitigates allocator fragmentation; the smaller
+micro-batch is the actual peak-memory fix.
 
 The job initializes from:
 
@@ -248,12 +261,9 @@ The job initializes from:
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-Its checkpoint and metrics use the new `seed_42_rl_fixed_ref_4gpu_eb512`
-directory, so the earlier `seed_42_rl_fixed_ref` run is not overwritten. The
-per-device batch remains 32 because it used about 22 GB in the single-GPU run;
-do not start by raising it to 64. If the first rollout still runs out of memory,
-use per-device batch 16 and accumulation 8 while keeping the explicit
-generation batch at 512.
+Its checkpoint and metrics use the new
+`seed_42_rl_fixed_ref_4gpu_eb512_mb8_ga16` directory, so neither the earlier
+single-GPU run nor the failed four-GPU directory is mixed with this run.
 
 Only after experiment 3 establishes the large-batch fixed-reference result
 should the otherwise matched periodic-sync job be run. Do not launch a second
