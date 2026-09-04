@@ -34,6 +34,7 @@ from .rl_logging import PersistentRLTrainingMetricsCallback
 from .sft import catalog_alignment_maps
 
 RL_METHODS = ("direct_rl", "minionerec_rl")
+BASELINE_RL_TASK_SCOPES = ("official_mixed", "history_only")
 
 
 def canonical_rl_method(method: str) -> str:
@@ -166,13 +167,18 @@ def build_baseline_rl_rows(
     max_history_len: int,
     title_sequence_limit: int = 10_000,
     seed: int = 42,
+    task_scope: str = "official_mixed",
 ) -> tuple[list[dict[str, str]], dict[str, int]]:
-    """Build the enabled Direct/MiniOneRec RL tasks without heavy dependencies."""
+    """Build Direct/MiniOneRec RL rows under an explicit task-mixture scope."""
 
     method = canonical_rl_method(method)
+    if task_scope not in BASELINE_RL_TASK_SCOPES:
+        raise ValueError(
+            "RL task scope must be one of: " + ", ".join(BASELINE_RL_TASK_SCOPES)
+        )
     rows = [_history_rl_row(record, max_history_len) for record in records]
     task_counts = {"history_sid_to_sid": len(rows)}
-    if method == "direct_rl":
+    if method == "direct_rl" or task_scope == "history_only":
         return rows, task_counts
     if item_metadata is None:
         raise ValueError("MiniOneRec-RL requires item metadata")
@@ -513,6 +519,7 @@ def train(args: argparse.Namespace) -> None:
         args.max_history_len,
         args.title_sequence_limit,
         args.seed,
+        args.task_scope,
     )
     valid_rows, valid_task_counts = build_baseline_rl_rows(
         "direct_rl",
@@ -568,6 +575,7 @@ def train(args: argparse.Namespace) -> None:
                     "valid_samples": len(valid_rows),
                     "task_counts": task_counts,
                     "valid_task_counts": valid_task_counts,
+                    "task_scope": args.task_scope,
                     "catalog_items": len(sid_map),
                     "item_metadata": len(item_metadata) if item_metadata is not None else 0,
                     "num_generations": args.num_generations,
@@ -714,6 +722,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_history_len", type=int, default=50, choices=(10, 20, 50))
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--title_sequence_limit", type=int, default=10_000)
+    parser.add_argument(
+        "--task_scope",
+        choices=BASELINE_RL_TASK_SCOPES,
+        default="official_mixed",
+        help=(
+            "Use MiniOneRec's four-task RL mixture or only "
+            "SID-history-to-next-SID recommendation rows"
+        ),
+    )
     parser.add_argument("--num_generations", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=1e-3)

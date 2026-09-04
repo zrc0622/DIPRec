@@ -43,6 +43,7 @@ BASELINE_RL_REFERENCE_MODE="fixed"
 BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
 BASELINE_RL_EVAL_STEPS=0.1
+BASELINE_RL_TASK_SCOPE="official_mixed"
 DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
 DIPREC_RL_GENERATION_BATCH_SIZE=""
 DIPREC_RL_GRADIENT_ACCUMULATION_STEPS=8
@@ -97,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_ref_model_sync_steps) BASELINE_RL_REF_MODEL_SYNC_STEPS="$2"; shift 2 ;;
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
     --baseline_rl_eval_steps) BASELINE_RL_EVAL_STEPS="$2"; shift 2 ;;
+    --baseline_rl_task_scope) BASELINE_RL_TASK_SCOPE="$2"; shift 2 ;;
     --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_gradient_accumulation_steps) DIPREC_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -126,6 +128,10 @@ fi
 case "$BASELINE_RL_REFERENCE_MODE" in
   fixed|sync) ;;
   *) echo "--baseline_rl_reference_mode must be fixed or sync" >&2; exit 2 ;;
+esac
+case "$BASELINE_RL_TASK_SCOPE" in
+  official_mixed|history_only) ;;
+  *) echo "--baseline_rl_task_scope must be official_mixed or history_only" >&2; exit 2 ;;
 esac
 case "$SFT_PLAN_MODE" in
   single|diverse) ;;
@@ -398,6 +404,7 @@ run_baseline_rl() {
     --reference_mode "$BASELINE_RL_REFERENCE_MODE"
     --ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
     --ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"
+    --task_scope "$BASELINE_RL_TASK_SCOPE"
     --eval_steps "$BASELINE_RL_EVAL_STEPS"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"

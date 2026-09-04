@@ -220,12 +220,16 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 
 ### 3. RL
 
-Run experiment 3 first: a four-GPU MiniOneRec-RL fixed-reference job on Office
-Products using GPUs 0--3. The trainer uses rank-local generation, matching
-upstream MiniOneRec's default non-vLLM path. The 512-candidate configuration
-still exceeded the 48 GB limit on the longest local prompt batch, so the
-recommended configuration uses micro-batch 16, accumulation 4, and a global
-generation/effective batch of 256:
+Run the **history-only MiniOneRec-RL** ablation next. Its RL training set keeps
+only `SID history -> next SID` recommendation rows and removes title-to-SID,
+description-to-SID, and title-history-to-SID auxiliary rows. The SFT parent,
+sparse exact/rank-aware rewards, `G=16`, fixed reference, learning rate,
+epochs, and four-GPU batch settings are identical to the completed mixed-task
+control. Validation and test were already SID-history-only and remain
+unchanged.
+
+The trainer uses rank-local generation, matching upstream MiniOneRec's default
+non-vLLM path. Run on GPUs 0--3:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -236,7 +240,8 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb256_mb16_ga4 \
+  --run_tag rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4 \
+  --baseline_rl_task_scope history_only \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
@@ -256,6 +261,13 @@ setting reduces fragmentation but does not change the effective batch. If this
 configuration still OOMs, use batch 16, accumulation 2, and generation batch
 128 with a new run tag.
 
+`--baseline_rl_task_scope` defaults to `official_mixed` for reproducing the
+four-task MiniOneRec recipe. This experiment must explicitly use
+`history_only`. On Office Products it reduces the training set from 55,290
+mixed rows to 38,924 `history_sid_to_sid` rows. Both runs use two epochs, so
+each recommendation row receives the same number of exposures; only auxiliary
+updates and their compute are removed.
+
 The job initializes from:
 
 ```text
@@ -263,12 +275,12 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 Its checkpoint and metrics use the
-`seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4` directory and do not overwrite the earlier
-single-GPU run.
-
-Only after experiment 3 establishes the large-batch fixed-reference result
-should the otherwise matched periodic-sync job be run. Do not launch a second
-job concurrently on these four GPUs.
+`seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4` directory and do not
+overwrite the completed mixed-task control
+`seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4`. That control reached Valid
+Recall@10/NDCG@10 `0.22236/0.18418`, below the SFT parent's
+`0.23592/0.19000`; this run tests whether removing auxiliary RL tasks closes or
+reverses that drop.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These

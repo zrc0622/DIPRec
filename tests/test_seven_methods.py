@@ -373,6 +373,32 @@ class SevenMethodDataContractTest(unittest.TestCase):
         self.assertEqual(len(direct), 1)
         self.assertEqual(direct_counts, {"history_sid_to_sid": 1})
 
+    def test_minionerec_rl_history_only_keeps_only_recommendation_rows(self):
+        rows, counts = build_baseline_rl_rows(
+            "minionerec_rl",
+            [self.record],
+            self.sid_map,
+            self.item_metadata,
+            50,
+            task_scope="history_only",
+        )
+        self.assertEqual(counts, {"history_sid_to_sid": 1})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["task"], "history_sid_to_sid")
+        self.assertEqual(
+            rows[0]["prompt"], history_prompt(self.record, 50, reasoning=False)
+        )
+
+        with self.assertRaisesRegex(ValueError, "RL task scope"):
+            build_baseline_rl_rows(
+                "minionerec_rl",
+                [self.record],
+                self.sid_map,
+                self.item_metadata,
+                50,
+                task_scope="unknown",
+            )
+
     def test_minionerec_title_history_sampling_matches_pandas_random_state(self):
         records = [
             self.record | {"sample_id": str(index)}

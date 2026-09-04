@@ -478,6 +478,39 @@ class RunnerContractTest(unittest.TestCase):
         self.assertIn("--ref_model_sync_steps 512", synced.stdout)
         self.assertIn("--ref_model_mixup_alpha 0.6", synced.stdout)
 
+    def test_minionerec_history_only_scope_is_explicitly_forwarded(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "minionerec_rl",
+                "--dataset", "Office",
+                "--sft_run_tag", "sft6e_lr1e-4_best",
+                "--run_tag", "rl_history_only",
+                "--baseline_rl_task_scope", "history_only",
+                "--dry_run",
+            ],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--task_scope history_only", result.stdout)
+        self.assertIn(
+            "minionerec_rl/seed_42_rl_history_only/final_checkpoint",
+            result.stdout,
+        )
+
+        invalid = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "minionerec_rl",
+                "--dataset", "Office",
+                "--baseline_rl_task_scope", "invalid",
+                "--dry_run",
+            ],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("official_mixed or history_only", invalid.stderr)
+
     def test_diprec_rl_branches_share_the_same_sft_parent(self):
         script = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
         self.assertIn("diprec_traj_rl|diprec_plan_rl)", script)

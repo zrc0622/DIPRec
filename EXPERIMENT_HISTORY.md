@@ -266,11 +266,11 @@ group、2 epochs、55,290 optimizer steps。每组完成 10 次 validation eval�
 | `seed_42_rl_fixed_ref` | 0.22483 | 0.16728 | 0.12766 | -0.00370 |
 | `seed_42_rl_sync_ref` | 0.20304 | 0.14550 | 0.10432 | -0.02548 |
 
-## 8. 待运行：四卡大 batch fixed-reference RL
+## 8. 已完成：四卡大 batch、mixed-task fixed-reference RL
 
-这就是当前所称的“实验 3”。目标是保持其他条件不变，将每次 optimizer update
-包含的完整 GRPO group 从单卡实验的 2 组增加到 16 组，以检验旧 RL 退化是否
-主要来自有效奖励信号过少。
+该实验将每次 optimizer update 包含的完整 GRPO group 从单卡实验的 2 组增加到
+16 组，以检验旧 RL 退化是否主要来自有效 batch 太小。训练集仍沿用官方
+MiniOneRec 的四任务 mixture。
 
 Direct/MiniOneRec-RL 已采用与官方 MiniOneRec 默认 non-vLLM 路径一致的
 rank-local rollout：每个 rank 只生成自己的完整 GRPO group，之后仍由 TRL 跨 rank
@@ -304,15 +304,61 @@ bash scripts/run_experiment.sh \
 作为推荐命令。`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 用于降低显存
 碎片，但实际峰值主要通过将每卡 rollout 从 128 降至 64 个 candidate 来降低。
 
-预期新目录：
+结果目录：
 
 ```text
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4/
 ```
 
-## 9. 证据完整性
+训练任务共 55,290 行：38,924 条 `history_sid_to_sid`、3,443 条
+`title_to_sid`、2,923 条 `description_to_sid`、10,000 条
+`title_history_to_sid`。结果仍低于 SFT parent：
 
-- Office Products 的 7 个已完成 run 均有 `metrics.json`、`valid_metrics.json`
+| run | Val R@10 | Val NDCG@10 | Test R@10 | Test NDCG@10 |
+|---|---:|---:|---:|---:|
+| MiniOneRec-SFT parent | 0.23592 | 0.19000 | 0.17098 | 0.12972 |
+| 四卡 mixed-task RL | 0.22236 | 0.18418 | 0.16584 | 0.12580 |
+
+增大 batch 没有修复负收益。周期日志显示约 76% 的 G=16 group 内 reward 方差为
+0；同时 29.60% 的训练行属于最终推荐评测不包含的辅助任务。
+
+## 9. 待运行：history-only MiniOneRec-RL
+
+这是下一组单变量消融。只把训练任务从 `official_mixed` 改成
+`history_only`，保留 38,924 条 `SID history → next SID`；SFT parent、reward、
+`G=16`、fixed reference、LR、2 epochs 和四卡 batch 与第 8 节完全相同。
+validation/test 都保持原样。
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+DIPREC_DDP=1 \
+DIPREC_NUM_PROCESSES=4 \
+bash scripts/run_experiment.sh \
+  --method minionerec_rl \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4 \
+  --baseline_rl_task_scope history_only \
+  --baseline_rl_reference_mode fixed \
+  --baseline_rl_per_device_batch_size 16 \
+  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_generation_batch_size 256
+```
+
+预期目录：
+
+```text
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4/
+```
+
+判定顺序：先与第 8 节 mixed-task RL 的 Valid NDCG@10 `0.18418` 比较；若能
+超过，再看是否超过 SFT parent 的 `0.19000`。本实验不引入分层/语义奖励，因而
+只能检验辅助任务稀释假设，不能单独解决已确认的稀疏 reward 问题。
+
+## 10. 证据完整性
+
+- Office Products 的 8 个已完成 run 均有 `metrics.json`、`valid_metrics.json`
   和训练指标文件，命令参数由其中的 `training_config` 交叉验证。
 - Video Games `1e-4` 完整结果可从 Git 历史中的 `outputs.zip` 读取；当前工作树
   中该 zip 已被删除，本文没有恢复它。

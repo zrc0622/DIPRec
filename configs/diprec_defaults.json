@@ -25,6 +25,7 @@
   "baseline_rl_reference_mode": "fixed",
   "baseline_rl_ref_model_sync_steps": 512,
   "baseline_rl_ref_model_mixup_alpha": 0.6,
+  "baseline_rl_task_scope": "official_mixed",
   "baseline_rl_clip_ratio": 0.2,
   "baseline_rl_num_iterations": 1,
   "baseline_rl_learning_rate": 1e-5,

@@ -261,11 +261,15 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 ### 3. RL
 
-当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
-MiniOneRec-RL fixed-reference 实验。当前 trainer 已采用 rank-local 生成，与官方
-MiniOneRec 默认 non-vLLM 路径一致。由于 512-candidate 配置在最长的本地 prompt
-batch 上仍超过 48 GB，当前推荐 micro-batch 16、梯度累积 4，全局
-generation/effective batch 为 256：
+当前优先跑 **history-only MiniOneRec-RL**：RL 训练集只保留
+`SID history → next SID` 推荐任务，不再加入 `title → SID`、
+`description → SID` 和 `title history → SID` 三类辅助任务。SFT checkpoint、
+稀疏 exact/rank-aware reward、`G=16`、fixed reference、学习率、训练 epoch 和
+四卡 batch 均与已完成的 mixed-task 对照保持一致，因此这是一项只改变训练任务
+组成的消融。validation/test 本来就只包含 SID-history 推荐任务，不受该开关影响。
+
+当前 trainer 使用 rank-local 生成，与官方 MiniOneRec 默认 non-vLLM 路径一致。
+使用 GPU 0--3 运行：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
@@ -276,7 +280,8 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb256_mb16_ga4 \
+  --run_tag rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4 \
+  --baseline_rl_task_scope history_only \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
@@ -295,6 +300,12 @@ bash scripts/run_experiment.sh \
 碎片，不改变有效 batch。若该配置仍然 OOM，请换新 run tag，并进一步使用
 batch 16、累积 2、generation batch 128。
 
+`--baseline_rl_task_scope` 默认为 `official_mixed`，用于复现 MiniOneRec 的四任务
+配方；本实验必须显式传 `history_only`。Office Products 下，它将训练集从 mixed
+对照的 55,290 行缩减为 38,924 行，保留下来的每一行都是
+`history_sid_to_sid`。仍训练默认 2 epochs，所以每条推荐样本与 mixed 对照一样
+被遍历两次；减少的是辅助任务和相应计算，而不是推荐样本曝光次数。
+
 它从以下 SFT checkpoint 初始化：
 
 ```text
@@ -302,11 +313,10 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 RL checkpoint 和指标写入新的
-`seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4` 目录，不会覆盖之前的单卡
-`seed_42_rl_fixed_ref`。
-
-实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
-periodic-sync 对照；不要同时占用这四张卡启动第二个任务。
+`seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4` 目录，不会覆盖已完成的
+mixed-task 对照 `seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4`。后者的 Valid
+Recall@10/NDCG@10 为 `0.22236/0.18418`，低于 SFT 的
+`0.23592/0.19000`；新实验先判断去掉辅助任务能否缩小或逆转该下降。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
