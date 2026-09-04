@@ -215,52 +215,49 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 
 ### 3. RL
 
-First run a fixed-reference versus upstream-style periodically synchronized
-reference ablation on Office Products. Both jobs read the same SFT best
-checkpoint: `--run_tag` isolates RL outputs, while `--sft_run_tag` selects the
-shared SFT parent.
-
-Terminal 1 (GPU 0, fixed reference):
+Run experiment 3 first: a four-GPU MiniOneRec-RL fixed-reference job on Office
+Products using GPUs 0--3. Keep the already-tested per-device micro-batch at 32
+and use four gradient-accumulation steps to raise the effective candidate batch
+to 512:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 bash scripts/run_experiment.sh \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DIPREC_DDP=1 \
+DIPREC_NUM_PROCESSES=4 \
+bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref \
+  --run_tag rl_fixed_ref_4gpu_eb512 \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 1 \
-  2>&1 | tee minionerec_rl_office_fixed_ref.log
+  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_generation_batch_size 512
 ```
 
-Terminal 2 (GPU 1, synchronize every 512 optimizer steps using
-`ref ← 0.6·policy + 0.4·ref`):
+This gives:
 
-```bash
-CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
-  --method minionerec_rl \
-  --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_sync_ref \
-  --baseline_rl_reference_mode sync \
-  --baseline_rl_ref_model_sync_steps 512 \
-  --baseline_rl_ref_model_mixup_alpha 0.6 \
-  --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 1 \
-  2>&1 | tee minionerec_rl_office_sync_ref.log
+```text
+4 GPUs x 32 candidates/GPU x 4 accumulation steps = 512 candidates/update
+512 / 16 generations = 32 complete GRPO prompt groups/update
 ```
 
-Both jobs initialize from:
+The job initializes from:
 
 ```text
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-Their checkpoints and metrics use separate `seed_42_rl_fixed_ref` and
-`seed_42_rl_sync_ref` directories. The synchronized job's 512/0.6 settings are
-the TRL defaults selected by MiniOneRec's `sync_ref_model=True`; the fixed job
-always computes KL against the initial SFT weights.
+Its checkpoint and metrics use the new `seed_42_rl_fixed_ref_4gpu_eb512`
+directory, so the earlier `seed_42_rl_fixed_ref` run is not overwritten. The
+per-device batch remains 32 because it used about 22 GB in the single-GPU run;
+do not start by raising it to 64. If the first rollout still runs out of memory,
+use per-device batch 16 and accumulation 8 while keeping the explicit
+generation batch at 512.
+
+Only after experiment 3 establishes the large-batch fixed-reference result
+should the otherwise matched periodic-sync job be run. Do not launch a second
+job concurrently on these four GPUs.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These

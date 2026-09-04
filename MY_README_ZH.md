@@ -257,47 +257,45 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 ### 3. RL
 
-推荐先在 Office Products 上同时运行 fixed-reference 与原版 MiniOneRec 风格的
-periodic-sync reference 消融。两组都读取同一个 SFT best checkpoint；`--run_tag`
-只隔离 RL 输出，`--sft_run_tag` 专门指定共享的 SFT 父模型。
-
-终端 1（GPU 0，固定 reference）：
+当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
+MiniOneRec-RL fixed-reference 实验。每卡仍使用已经验证可容纳的 micro-batch
+32，通过 4 卡和梯度累积 4 将有效 candidate batch 扩大到 512：
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+DIPREC_DDP=1 \
+DIPREC_NUM_PROCESSES=4 \
+bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref \
+  --run_tag rl_fixed_ref_4gpu_eb512 \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 1
+  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_generation_batch_size 512
 ```
 
-终端 2（GPU 1，每 512 optimizer steps 同步一次，`ref ← 0.6·policy + 0.4·ref`）：
+该配置满足：
 
-```bash
-CUDA_VISIBLE_DEVICES=2 bash scripts/run_experiment.sh \
-  --method minionerec_rl \
-  --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_sync_ref \
-  --baseline_rl_reference_mode sync \
-  --baseline_rl_ref_model_sync_steps 512 \
-  --baseline_rl_ref_model_mixup_alpha 0.6 \
-  --baseline_rl_per_device_batch_size 32 \
-  --baseline_rl_gradient_accumulation_steps 1
+```text
+4 GPUs × 32 candidates/GPU × 4 accumulation steps = 512 candidates/update
+512 / 16 generations = 32 complete GRPO prompt groups/update
 ```
 
-两组都从以下 SFT checkpoint 初始化：
+它从以下 SFT checkpoint 初始化：
 
 ```text
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-RL checkpoint/指标分别写入 `seed_42_rl_fixed_ref` 和 `seed_42_rl_sync_ref`，不会互相覆盖。
-同步组的 512/0.6 正是 MiniOneRec 启动脚本启用 `sync_ref_model=True` 后采用的
-TRL 默认值；固定组则始终以初始 SFT 权重计算 KL。
+RL checkpoint 和指标写入新的 `seed_42_rl_fixed_ref_4gpu_eb512` 目录，不会覆盖
+之前的 `seed_42_rl_fixed_ref`。这里保持每卡 batch 32，是因为单卡该配置实测约占
+22 GB；不先把每卡 batch 提到 64。若首次 rollout 仍然 OOM，可保持有效 batch
+不变，改成每卡 batch 16、梯度累积 8，并继续显式设置 generation batch 512。
+
+实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
+periodic-sync 对照；不要同时占用这四张卡启动第二个任务。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
