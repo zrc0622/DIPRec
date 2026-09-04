@@ -263,35 +263,37 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
 MiniOneRec-RL fixed-reference 实验。当前 trainer 已采用 rank-local 生成，与官方
-MiniOneRec 默认 non-vLLM 路径一致。配置为 micro-batch 32、梯度累积 4，全局
-generation/effective batch 为 512：
+MiniOneRec 默认 non-vLLM 路径一致。由于 512-candidate 配置在最长的本地 prompt
+batch 上仍超过 48 GB，当前推荐 micro-batch 16、梯度累积 4，全局
+generation/effective batch 为 256：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512 \
+  --run_tag rl_fixed_ref_4gpu_eb256_mb16_ga4 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 32 \
+  --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 512
+  --baseline_rl_generation_batch_size 256
 ```
 
 该配置满足：
 
 ```text
-4 GPUs × 32 candidates/GPU × 4 accumulation steps = 512 candidates/update
-512 / 16 generations = 32 complete GRPO prompt groups/update
-每个 rank 生成 512 / 4 = 128 candidates = 8 个完整 group
+4 GPUs × 16 candidates/GPU × 4 accumulation steps = 256 candidates/update
+256 / 16 generations = 16 complete GRPO prompt groups/update
+每个 rank 生成 256 / 4 = 64 candidates = 4 个完整 group
 ```
 
-四张卡分别只生成本地 128 个 candidate（8 个 prompt）。如果后续出现“仍有空闲
-显存但申请连续显存失败”的碎片型 OOM，可以在命令前额外设置
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`；rank-local 生成不依赖该参数。
+四张卡分别只生成本地 64 个 candidate（4 个 prompt）。显存分配器设置用于减少
+碎片，不改变有效 batch。若该配置仍然 OOM，请换新 run tag，并进一步使用
+batch 16、累积 2、generation batch 128。
 
 它从以下 SFT checkpoint 初始化：
 
@@ -300,7 +302,7 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 RL checkpoint 和指标写入新的
-`seed_42_rl_fixed_ref_4gpu_eb512` 目录，不会覆盖之前的单卡
+`seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4` 目录，不会覆盖之前的单卡
 `seed_42_rl_fixed_ref`。
 
 实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
