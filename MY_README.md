@@ -220,13 +220,19 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 
 ### 3. RL
 
-Run the **history-only MiniOneRec-RL** ablation next. Its RL training set keeps
-only `SID history -> next SID` recommendation rows and removes title-to-SID,
-description-to-SID, and title-history-to-SID auxiliary rows. The SFT parent,
-sparse exact/rank-aware rewards, `G=16`, fixed reference, learning rate,
-epochs, and four-GPU batch settings are identical to the completed mixed-task
-control. Validation and test were already SID-history-only and remain
-unchanged.
+Run the **one-epoch conservative MiniOneRec-RL** experiment next. The completed
+history-only ablation did not improve over SFT: it is effectively tied with
+mixed-task RL, and both are below their SFT parent. This run therefore restores
+the official four-task `official_mixed` scope and changes only the optimization
+strength: learning rate `1e-5 -> 2e-6`, KL beta `1e-3 -> 1e-2`, and epochs
+`2 -> 1`. The SFT checkpoint, sparse exact/rank-aware reward, `G=16`, fixed
+reference, and four-GPU effective batch 256 remain unchanged.
+
+This is a pure hyperparameter diagnostic. It tests whether smaller updates,
+stronger KL control, and a shorter run prevent harmful policy drift. It does
+not fix the roughly 76% of GRPO groups with zero reward variance; if it still
+fails to beat SFT, the next change should target the reward rather than reduce
+the epoch count again.
 
 The trainer uses rank-local generation, matching upstream MiniOneRec's default
 non-vLLM path. Run on GPUs 0--3:
@@ -240,12 +246,15 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4 \
-  --baseline_rl_task_scope history_only \
+  --run_tag rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256 \
+  --baseline_rl_task_scope official_mixed \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 256
+  --baseline_rl_generation_batch_size 256 \
+  --baseline_rl_learning_rate 2e-6 \
+  --baseline_rl_beta 1e-2 \
+  --baseline_rl_num_epochs 1
 ```
 
 This gives:
@@ -261,12 +270,11 @@ setting reduces fragmentation but does not change the effective batch. If this
 configuration still OOMs, use batch 16, accumulation 2, and generation batch
 128 with a new run tag.
 
-`--baseline_rl_task_scope` defaults to `official_mixed` for reproducing the
-four-task MiniOneRec recipe. This experiment must explicitly use
-`history_only`. On Office Products it reduces the training set from 55,290
-mixed rows to 38,924 `history_sid_to_sid` rows. Both runs use two epochs, so
-each recommendation row receives the same number of exposures; only auxiliary
-updates and their compute are removed.
+On Office Products, `official_mixed` contains 55,290 rows: 38,924
+`history_sid_to_sid` rows and 16,366 title/description auxiliary rows. The
+command spells out task scope, learning rate, beta, and epoch count instead of
+depending on historical defaults. When omitted, the runner retains the old
+`1e-5`, `1e-3`, and two-epoch defaults for reproducibility.
 
 The job initializes from:
 
@@ -274,13 +282,19 @@ The job initializes from:
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-Its checkpoint and metrics use the
-`seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4` directory and do not
-overwrite the completed mixed-task control
-`seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4`. That control reached Valid
-Recall@10/NDCG@10 `0.22236/0.18418`, below the SFT parent's
-`0.23592/0.19000`; this run tests whether removing auxiliary RL tasks closes or
-reverses that drop.
+Its checkpoint and metrics use the new
+`seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256` directory and do
+not overwrite prior runs. Current controls are:
+
+| checkpoint | Valid R@10 / NDCG@10 | Test R@10 / NDCG@10 |
+|---|---:|---:|
+| SFT parent | 0.23592 / 0.19000 | 0.17098 / 0.12972 |
+| two-epoch mixed RL | 0.22236 / 0.18418 | 0.16584 / 0.12580 |
+| two-epoch history-only RL | 0.22544 / 0.18481 | 0.16482 / 0.12644 |
+
+The new run should first recover at least the SFT Valid NDCG@10 of `0.19000`.
+A smaller degradation from training for less time must not be reported as a
+positive RL gain.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These
@@ -348,7 +362,7 @@ bash scripts/run_all_comparisons.sh \
 
 Common options: `--max_history_len 10|20|50`, `--model Qwen/Qwen3-1.7B`, and `--conditioning history_visible|interest_bottleneck`. Use `--run_tag sft6e_lr1e-4_best` to keep a retrain separate from existing checkpoints; SFT refuses to overwrite either `best_checkpoint` or `final_checkpoint`. SFT controls are `--sft_num_epochs`, `--sft_micro_batch_size`, `--sft_gradient_accumulation_steps`, `--sft_learning_rate`, `--sft_weight_decay`, and `--sft_warmup_ratio`.
 
-RL batch controls: `--baseline_rl_per_device_batch_size`, `--baseline_rl_generation_batch_size`, `--baseline_rl_gradient_accumulation_steps`, plus the analogous `--diprec_rl_*` options. Leave generation batch unset to derive it safely. If set explicitly, it must contain complete `num_generations`/`num_plans` groups and equal the global effective update batch. For Direct/MiniOneRec-RL, both the global generation batch and its per-rank share must be divisible by `num_generations`; this ensures every rank owns complete GRPO groups. TRL consequently derives `steps_per_generation = gradient_accumulation_steps`. Internally, its sampler uses `repeat_count = num_iterations × steps_per_generation`: the `steps_per_generation` factor feeds all micro-step slices, while `num_iterations` determines how many optimizer updates reuse the rollout. Keep DIPRec `num_iterations >= 2`, so the same rollout drives two optimizer updates and PPO clipping is active on the reused update.
+RL batch controls are `--baseline_rl_per_device_batch_size`, `--baseline_rl_generation_batch_size`, and `--baseline_rl_gradient_accumulation_steps`; optimization controls are `--baseline_rl_learning_rate`, `--baseline_rl_beta`, and `--baseline_rl_num_epochs`, plus the analogous `--diprec_rl_*` options. Leave generation batch unset to derive it safely. If set explicitly, it must contain complete `num_generations`/`num_plans` groups and equal the global effective update batch. For Direct/MiniOneRec-RL, both the global generation batch and its per-rank share must be divisible by `num_generations`; this ensures every rank owns complete GRPO groups. TRL consequently derives `steps_per_generation = gradient_accumulation_steps`. Internally, its sampler uses `repeat_count = num_iterations × steps_per_generation`: the `steps_per_generation` factor feeds all micro-step slices, while `num_iterations` determines how many optimizer updates reuse the rollout. Keep DIPRec `num_iterations >= 2`, so the same rollout drives two optimizer updates and PPO clipping is active on the reused update.
 
 ## 9. Run checks
 

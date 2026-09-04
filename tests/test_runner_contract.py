@@ -511,6 +511,25 @@ class RunnerContractTest(unittest.TestCase):
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("official_mixed or history_only", invalid.stderr)
 
+    def test_baseline_rl_optimization_overrides_are_forwarded(self):
+        result = subprocess.run(
+            [
+                "bash", "scripts/run_experiment.sh",
+                "--method", "minionerec_rl",
+                "--dataset", "Office",
+                "--baseline_rl_learning_rate", "2e-6",
+                "--baseline_rl_beta", "1e-2",
+                "--baseline_rl_num_epochs", "1",
+                "--dry_run",
+            ],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--learning_rate 2e-6", result.stdout)
+        self.assertIn("--beta 1e-2", result.stdout)
+        self.assertIn("--num_epochs 1", result.stdout)
+        self.assertIn("--task_scope official_mixed", result.stdout)
+
     def test_diprec_rl_branches_share_the_same_sft_parent(self):
         script = (ROOT / "scripts/run_experiment.sh").read_text(encoding="utf-8")
         self.assertIn("diprec_traj_rl|diprec_plan_rl)", script)

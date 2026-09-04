@@ -39,6 +39,9 @@ SFT_WARMUP_RATIO=0.03
 BASELINE_RL_PER_DEVICE_BATCH_SIZE=32
 BASELINE_RL_GENERATION_BATCH_SIZE=""
 BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=1
+BASELINE_RL_LEARNING_RATE=1e-5
+BASELINE_RL_BETA=0.001
+BASELINE_RL_NUM_EPOCHS=2
 BASELINE_RL_REFERENCE_MODE="fixed"
 BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
@@ -94,6 +97,9 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_per_device_batch_size) BASELINE_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_generation_batch_size) BASELINE_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_gradient_accumulation_steps) BASELINE_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --baseline_rl_learning_rate) BASELINE_RL_LEARNING_RATE="$2"; shift 2 ;;
+    --baseline_rl_beta) BASELINE_RL_BETA="$2"; shift 2 ;;
+    --baseline_rl_num_epochs) BASELINE_RL_NUM_EPOCHS="$2"; shift 2 ;;
     --baseline_rl_reference_mode) BASELINE_RL_REFERENCE_MODE="$2"; shift 2 ;;
     --baseline_rl_ref_model_sync_steps) BASELINE_RL_REF_MODEL_SYNC_STEPS="$2"; shift 2 ;;
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
@@ -191,11 +197,18 @@ for value in \
   "$SFT_GRADIENT_ACCUMULATION_STEPS" \
   "$BASELINE_RL_PER_DEVICE_BATCH_SIZE" \
   "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS" \
+  "$BASELINE_RL_NUM_EPOCHS" \
   "$DIPREC_RL_PER_DEVICE_BATCH_SIZE" \
   "$DIPREC_RL_GRADIENT_ACCUMULATION_STEPS" \
   "$DIPREC_RL_NUM_ITERATIONS"; do
   if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
     echo "Batch settings must be positive integers, got: $value" >&2
+    exit 2
+  fi
+done
+for value in "$BASELINE_RL_LEARNING_RATE" "$BASELINE_RL_BETA"; do
+  if ! [[ "$value" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ ]]; then
+    echo "Baseline RL learning rate and beta must be non-negative numbers, got: $value" >&2
     exit 2
   fi
 done
@@ -401,6 +414,9 @@ run_baseline_rl() {
     --num_generations 16
     --per_device_batch_size "$BASELINE_RL_PER_DEVICE_BATCH_SIZE"
     --gradient_accumulation_steps "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS"
+    --learning_rate "$BASELINE_RL_LEARNING_RATE"
+    --beta "$BASELINE_RL_BETA"
+    --num_epochs "$BASELINE_RL_NUM_EPOCHS"
     --reference_mode "$BASELINE_RL_REFERENCE_MODE"
     --ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
     --ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"

@@ -1,6 +1,6 @@
 # DIPRec 实验历史台账
 
-最后更新：2026-09-04
+最后更新：2026-09-05
 
 本文只记录已经实际运行过的实验，以及当前已经确定但尚未运行的下一组实验。
 训练产物中的 `training_config`、逐 epoch 日志和评测指标优先级最高；README
@@ -40,6 +40,8 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是最后一轮。
 | OP-DIP-J2 | Office Products | 新 joint activation，diverse | 2 | 0.23448 | 0.17139 | 0.13035 |
 | OP-RL-F1 | Office Products | MiniOneRec-RL，fixed reference | final | 0.22483 | 0.16728 | 0.12766 |
 | OP-RL-S1 | Office Products | MiniOneRec-RL，periodic sync | final | 0.20304 | 0.14550 | 0.10432 |
+| OP-RL-F4 | Office Products | MiniOneRec-RL，mixed-task fixed reference，四卡 | final | 0.22236 | 0.16584 | 0.12580 |
+| OP-RL-H1 | Office Products | MiniOneRec-RL，history-only，四卡 | final | 0.22544 | 0.16482 | 0.12644 |
 
 ### 当前结论
 
@@ -52,6 +54,9 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是最后一轮。
 - 两个单卡小 batch RL 都没有提升父 SFT。fixed-reference 轻微下降，sync-reference
   明显下降；旧 RL 每次更新只有 2 个完整 GRPO group，约 76%--78% 的验证 group
   reward 标准差为零，sync 还出现过很大的 KL 尖峰。
+- 四卡 history-only RL 与四卡 mixed-task RL 基本持平，仍低于 SFT parent；去掉
+  三类辅助任务没有消除负收益，下一组恢复 `official_mixed` 并仅测试更保守的优化
+  配置。
 
 ## 3. Video Games：MiniOneRec-SFT 学习率实验
 
@@ -322,9 +327,9 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixe
 增大 batch 没有修复负收益。周期日志显示约 76% 的 G=16 group 内 reward 方差为
 0；同时 29.60% 的训练行属于最终推荐评测不包含的辅助任务。
 
-## 9. 待运行：history-only MiniOneRec-RL
+## 9. 已完成：history-only MiniOneRec-RL
 
-这是下一组单变量消融。只把训练任务从 `official_mixed` 改成
+这是相对第 8 节的单变量消融。只把训练任务从 `official_mixed` 改成
 `history_only`，保留 38,924 条 `SID history → next SID`；SFT parent、reward、
 `G=16`、fixed reference、LR、2 epochs 和四卡 batch 与第 8 节完全相同。
 validation/test 都保持原样。
@@ -346,19 +351,75 @@ bash scripts/run_experiment.sh \
   --baseline_rl_generation_batch_size 256
 ```
 
-预期目录：
+结果目录：
 
 ```text
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4/
 ```
 
-判定顺序：先与第 8 节 mixed-task RL 的 Valid NDCG@10 `0.18418` 比较；若能
-超过，再看是否超过 SFT parent 的 `0.19000`。本实验不引入分层/语义奖励，因而
-只能检验辅助任务稀释假设，不能单独解决已确认的稀疏 reward 问题。
+结果：
 
-## 10. 证据完整性
+| run | Val R@10 | Val NDCG@10 | Test R@10 | Test NDCG@10 |
+|---|---:|---:|---:|---:|
+| MiniOneRec-SFT parent | 0.23592 | 0.19000 | 0.17098 | 0.12972 |
+| 四卡 mixed-task RL | 0.22236 | 0.18418 | 0.16584 | 0.12580 |
+| 四卡 history-only RL | 0.22544 | 0.18481 | 0.16482 | 0.12644 |
 
-- Office Products 的 8 个已完成 run 均有 `metrics.json`、`valid_metrics.json`
+history-only 相对 mixed 的 Valid R@10/NDCG@10 仅增加 `0.00308/0.00063`，Test
+R@10 反而减少 `0.00103`，Test NDCG@10 仅增加 `0.00064`；这些差异不足以说明
+history-only 更好，而且两种 RL 都低于 SFT parent。因此“辅助任务稀释”不是当前
+负收益的主因，不再把 history-only 作为下一步推荐方向。该实验没有改变稀疏
+reward，约 76% 的零方差 group 问题仍然存在。
+
+## 10. 待运行：1-epoch 保守版 mixed-task MiniOneRec-RL
+
+下一组恢复官方四任务 `official_mixed`，继续使用第 8 节的 SFT parent、reward、
+`G=16`、fixed reference 和四卡 effective batch 256，只改变三个优化参数：
+
+```text
+learning rate: 1e-5 -> 2e-6
+KL beta:       1e-3 -> 1e-2
+epochs:        2 -> 1
+```
+
+运行命令：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+DIPREC_DDP=1 \
+DIPREC_NUM_PROCESSES=4 \
+bash scripts/run_experiment.sh \
+  --method minionerec_rl \
+  --dataset Office_Products \
+  --sft_run_tag sft6e_lr1e-4_best \
+  --run_tag rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256 \
+  --baseline_rl_task_scope official_mixed \
+  --baseline_rl_reference_mode fixed \
+  --baseline_rl_per_device_batch_size 16 \
+  --baseline_rl_gradient_accumulation_steps 4 \
+  --baseline_rl_generation_batch_size 256 \
+  --baseline_rl_learning_rate 2e-6 \
+  --baseline_rl_beta 1e-2 \
+  --baseline_rl_num_epochs 1
+```
+
+预期目录：
+
+```text
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256/
+```
+
+这是一项纯调参诊断，不修改 reward。它检验此前的负收益是否主要来自 LR 过大、
+KL 约束过弱和训练过久造成的 policy drift。首要判据是 Valid NDCG@10 是否超过
+SFT parent 的 `0.19000`，其次看 Valid Recall@10 是否超过 `0.23592`。即使它只
+比旧 RL 更接近 SFT，也不能称为 RL 正收益。由于这组实验不会减少约 76% 的
+零方差 reward group，若仍未超过 SFT，下一步应修改 reward，而不是继续减少
+epoch。
+
+## 11. 证据完整性
+
+- Office Products 的 9 个已完成 run 均有 `metrics.json`、`valid_metrics.json`
   和训练指标文件，命令参数由其中的 `training_config` 交叉验证。
 - Video Games `1e-4` 完整结果可从 Git 历史中的 `outputs.zip` 读取；当前工作树
   中该 zip 已被删除，本文没有恢复它。

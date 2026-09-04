@@ -35,6 +35,9 @@ SFT_WARMUP_RATIO=0.03
 BASELINE_RL_PER_DEVICE_BATCH_SIZE=32
 BASELINE_RL_GENERATION_BATCH_SIZE=""
 BASELINE_RL_GRADIENT_ACCUMULATION_STEPS=1
+BASELINE_RL_LEARNING_RATE=1e-5
+BASELINE_RL_BETA=0.001
+BASELINE_RL_NUM_EPOCHS=2
 BASELINE_RL_REFERENCE_MODE="fixed"
 BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
@@ -81,6 +84,9 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_per_device_batch_size) BASELINE_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_generation_batch_size) BASELINE_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --baseline_rl_gradient_accumulation_steps) BASELINE_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
+    --baseline_rl_learning_rate) BASELINE_RL_LEARNING_RATE="$2"; shift 2 ;;
+    --baseline_rl_beta) BASELINE_RL_BETA="$2"; shift 2 ;;
+    --baseline_rl_num_epochs) BASELINE_RL_NUM_EPOCHS="$2"; shift 2 ;;
     --baseline_rl_reference_mode) BASELINE_RL_REFERENCE_MODE="$2"; shift 2 ;;
     --baseline_rl_ref_model_sync_steps) BASELINE_RL_REF_MODEL_SYNC_STEPS="$2"; shift 2 ;;
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
@@ -142,6 +148,9 @@ for dataset in "${DATASETS[@]}"; do
         --sft_warmup_ratio "$SFT_WARMUP_RATIO"
         --baseline_rl_per_device_batch_size "$BASELINE_RL_PER_DEVICE_BATCH_SIZE"
         --baseline_rl_gradient_accumulation_steps "$BASELINE_RL_GRADIENT_ACCUMULATION_STEPS"
+        --baseline_rl_learning_rate "$BASELINE_RL_LEARNING_RATE"
+        --baseline_rl_beta "$BASELINE_RL_BETA"
+        --baseline_rl_num_epochs "$BASELINE_RL_NUM_EPOCHS"
         --baseline_rl_reference_mode "$BASELINE_RL_REFERENCE_MODE"
         --baseline_rl_ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
         --baseline_rl_ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"

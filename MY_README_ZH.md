@@ -261,12 +261,15 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 ### 3. RL
 
-当前优先跑 **history-only MiniOneRec-RL**：RL 训练集只保留
-`SID history → next SID` 推荐任务，不再加入 `title → SID`、
-`description → SID` 和 `title history → SID` 三类辅助任务。SFT checkpoint、
-稀疏 exact/rank-aware reward、`G=16`、fixed reference、学习率、训练 epoch 和
-四卡 batch 均与已完成的 mixed-task 对照保持一致，因此这是一项只改变训练任务
-组成的消融。validation/test 本来就只包含 SID-history 推荐任务，不受该开关影响。
+当前优先跑 **1-epoch 保守版 MiniOneRec-RL**。已完成的 history-only 消融并未
+改善 SFT：它与 mixed-task RL 基本持平，而且两者都低于 SFT parent。因此本次
+恢复官方四任务 `official_mixed`，只把学习率从 `1e-5` 降到 `2e-6`、KL beta 从
+`1e-3` 提到 `1e-2`、训练轮数从 2 降到 1。SFT checkpoint、稀疏
+exact/rank-aware reward、`G=16`、fixed reference 和四卡有效 batch 256 均不变。
+
+这是一项纯调参诊断：检验更小更新、更强 KL 约束和更短训练能否抑制策略漂移，
+使 RL 不再产生负收益。它不会解决约 76% 的 GRPO group reward 方差为零这一根本
+问题，因此若仍无提升，下一步应修改 reward，而不是继续缩短 epoch。
 
 当前 trainer 使用 rank-local 生成，与官方 MiniOneRec 默认 non-vLLM 路径一致。
 使用 GPU 0--3 运行：
@@ -280,12 +283,15 @@ bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4 \
-  --baseline_rl_task_scope history_only \
+  --run_tag rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256 \
+  --baseline_rl_task_scope official_mixed \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 256
+  --baseline_rl_generation_batch_size 256 \
+  --baseline_rl_learning_rate 2e-6 \
+  --baseline_rl_beta 1e-2 \
+  --baseline_rl_num_epochs 1
 ```
 
 该配置满足：
@@ -300,11 +306,10 @@ bash scripts/run_experiment.sh \
 碎片，不改变有效 batch。若该配置仍然 OOM，请换新 run tag，并进一步使用
 batch 16、累积 2、generation batch 128。
 
-`--baseline_rl_task_scope` 默认为 `official_mixed`，用于复现 MiniOneRec 的四任务
-配方；本实验必须显式传 `history_only`。Office Products 下，它将训练集从 mixed
-对照的 55,290 行缩减为 38,924 行，保留下来的每一行都是
-`history_sid_to_sid`。仍训练默认 2 epochs，所以每条推荐样本与 mixed 对照一样
-被遍历两次；减少的是辅助任务和相应计算，而不是推荐样本曝光次数。
+`official_mixed` 在 Office Products 上包含 55,290 行：38,924 条
+`history_sid_to_sid`，以及 16,366 条 title/description 辅助任务。这里显式写出
+task scope、学习率、beta 和 epoch，避免依赖历史默认值；未显式覆盖时 runner 仍
+保持旧配方的 `1e-5`、`1e-3` 和 2 epochs，不影响旧实验复现。
 
 它从以下 SFT checkpoint 初始化：
 
@@ -313,10 +318,17 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 RL checkpoint 和指标写入新的
-`seed_42_rl_history_only_fixed_ref_4gpu_eb256_mb16_ga4` 目录，不会覆盖已完成的
-mixed-task 对照 `seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4`。后者的 Valid
-Recall@10/NDCG@10 为 `0.22236/0.18418`，低于 SFT 的
-`0.23592/0.19000`；新实验先判断去掉辅助任务能否缩小或逆转该下降。
+`seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256` 目录，不会覆盖
+已有实验。当前对照结果如下：
+
+| checkpoint | Valid R@10 / NDCG@10 | Test R@10 / NDCG@10 |
+|---|---:|---:|
+| SFT parent | 0.23592 / 0.19000 | 0.17098 / 0.12972 |
+| 2-epoch mixed RL | 0.22236 / 0.18418 | 0.16584 / 0.12580 |
+| 2-epoch history-only RL | 0.22544 / 0.18481 | 0.16482 / 0.12644 |
+
+新实验首先看 Valid NDCG@10 是否至少回到 SFT 的 `0.19000`；若没有，则不能把
+“少训一轮后退化较小”误写成 RL 有收益。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
@@ -380,7 +392,7 @@ bash scripts/run_all_comparisons.sh \
 
 常用参数：`--max_history_len 10|20|50`、`--model Qwen/Qwen3-1.7B`、`--conditioning history_visible|interest_bottleneck`。用 `--run_tag sft6e_lr1e-4_best` 可以让重训与旧 checkpoint 隔离；SFT 不会覆盖已有的 `best_checkpoint` 或 `final_checkpoint`。SFT 参数包括 `--sft_num_epochs`、`--sft_micro_batch_size`、`--sft_gradient_accumulation_steps`、`--sft_learning_rate`、`--sft_weight_decay`、`--sft_warmup_ratio`。
 
-RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，以及对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。对于 Direct/MiniOneRec-RL，全局 generation batch 及其每个 rank 的份额还都必须能被 `num_generations` 整除，以保证每张卡拿到完整 GRPO group。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
+RL 批参数包括 `--baseline_rl_per_device_batch_size`、`--baseline_rl_generation_batch_size`、`--baseline_rl_gradient_accumulation_steps`，优化参数包括 `--baseline_rl_learning_rate`、`--baseline_rl_beta` 和 `--baseline_rl_num_epochs`，另有对应的 `--diprec_rl_*` 参数。建议不传 generation batch，由程序安全推导；若显式指定，它必须包含完整的 `num_generations`/`num_plans` 分组，并等于全局有效 update batch。对于 Direct/MiniOneRec-RL，全局 generation batch 及其每个 rank 的份额还都必须能被 `num_generations` 整除，以保证每张卡拿到完整 GRPO group。这样 TRL 会得到 `steps_per_generation = gradient_accumulation_steps`。其 sampler 内部使用 `repeat_count = num_iterations × steps_per_generation`：后一个因子用于依次提供所有 micro-step slice，前一个才表示同一 rollout 被多少次 optimizer update 复用。DIPRec 请保持 `num_iterations >= 2`，使同一 rollout 对应两次 optimizer update，第二次更新能实际触发 PPO clipping。
 
 ## 9. 运行检查
 
