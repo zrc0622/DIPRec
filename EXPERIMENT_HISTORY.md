@@ -269,7 +269,7 @@ group、2 epochs、55,290 optimizer steps。每组完成 10 次 validation eval�
 ## 8. 待运行：四卡大 batch fixed-reference RL
 
 这就是当前所称的“实验 3”。目标是保持其他条件不变，将每次 optimizer update
-包含的完整 GRPO group 从单卡实验的 2 组增加到 32 组，以检验旧 RL 退化是否
+包含的完整 GRPO group 从单卡实验的 2 组增加到 16 组，以检验旧 RL 退化是否
 主要来自有效奖励信号过少。
 
 Direct/MiniOneRec-RL 已采用与官方 MiniOneRec 默认 non-vLLM 路径一致的
@@ -278,34 +278,36 @@ rank-local rollout：每个 rank 只生成自己的完整 GRPO group，之后仍
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_eb512 \
+  --run_tag rl_fixed_ref_4gpu_eb256_mb16_ga4 \
   --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 32 \
+  --baseline_rl_per_device_batch_size 16 \
   --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 512
+  --baseline_rl_generation_batch_size 256
 ```
 
 配置含义：
 
 ```text
-4 GPUs × 32 candidates/GPU × 4 accumulation = 512 candidates/update
-512 / G=16 = 32 complete GRPO prompt groups/update
-每个 rank 生成 512 / 4 = 128 candidates（8 个完整 group）
+4 GPUs × 16 candidates/GPU × 4 accumulation = 256 candidates/update
+256 / G=16 = 16 complete GRPO prompt groups/update
+每个 rank 生成 256 / 4 = 64 candidates（4 个完整 group）
 ```
 
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 仅是发生显存碎片时的可选设置，
-不是该命令或 rank-local 生成的必要条件。
+此前的 512-candidate rank-local 配置仍在最长本地 prompt batch 上 OOM，因此不再
+作为推荐命令。`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 用于降低显存
+碎片，但实际峰值主要通过将每卡 rollout 从 128 降至 64 个 candidate 来降低。
 
 预期新目录：
 
 ```text
-outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb512/
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_fixed_ref_4gpu_eb256_mb16_ga4/
 ```
 
 ## 9. 证据完整性
