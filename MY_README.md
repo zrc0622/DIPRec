@@ -221,22 +221,19 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 ### 3. RL
 
 Run experiment 3 first: a four-GPU MiniOneRec-RL fixed-reference job on Office
-Products using GPUs 0--3. The original implementation failed at `0/3454`
-because it gathered the complete global rollout onto rank 0; that process had
-41.78/44.39 GiB in use and OOMed while requesting another 1.50 GiB. The trainer
-now uses rank-local generation, matching upstream MiniOneRec's default non-vLLM
-path. Restore the faster micro-batch-32/accumulation-4 configuration:
+Products using GPUs 0--3. The trainer uses rank-local generation, matching
+upstream MiniOneRec's default non-vLLM path. Use micro-batch 32, accumulation 4,
+and a global generation/effective batch of 512:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4 \
+  --run_tag rl_fixed_ref_4gpu_eb512 \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 32 \
   --baseline_rl_gradient_accumulation_steps 4 \
@@ -251,14 +248,10 @@ This gives:
 Each rank generates 512 / 4 = 128 candidates = 8 complete groups/rollout
 ```
 
-Before this code fix, rank 0 generated all 512 candidates (32 unique prompts)
-while the other ranks generated none. It now generates only its local 128
-candidates (8 prompts), as do the other three ranks. TRL constructs the whole
-accumulation rollout before generation, so changing to micro-batch 8 and
-accumulation 16 would still generate 128 candidates per rank and would merely
-add slower micro-steps. If 128 local candidates still exceed one GPU, reduce
-the global generation/effective batch (for example, batch 32, accumulation 2,
-generation batch 256); that is a different effective-batch experiment.
+Each rank generates only its local 128 candidates (8 prompts). If CUDA reports
+allocator fragmentation despite sufficient free memory, optionally prefix the
+command with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; it is not
+required for rank-local generation.
 
 The job initializes from:
 
@@ -266,9 +259,9 @@ The job initializes from:
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-Its checkpoint and metrics use the new
-`seed_42_rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4` directory, so neither the earlier
-single-GPU run nor the failed four-GPU directory is mixed with this run.
+Its checkpoint and metrics use the
+`seed_42_rl_fixed_ref_4gpu_eb512` directory and do not overwrite the earlier
+single-GPU run.
 
 Only after experiment 3 establishes the large-batch fixed-reference result
 should the otherwise matched periodic-sync job be run. Do not launch a second

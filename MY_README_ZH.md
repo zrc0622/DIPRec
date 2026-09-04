@@ -262,22 +262,19 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 ### 3. RL
 
 当前优先跑实验 3：在 Office Products 上使用 GPU 0--3 做四卡
-MiniOneRec-RL fixed-reference 实验。旧实现第一次采用 micro-batch 32、梯度累积
-4，在第一个 rollout、进度 `0/3454` 时失败：它把全局 rollout 汇集到 rank 0，
-导致该进程已占用 41.78/44.39 GiB，继续申请 1.50 GiB 时 OOM。现在代码已改为
-每个 rank 本地生成，与官方 MiniOneRec 默认 non-vLLM 路径一致，因此恢复更快的
-micro-batch 32、梯度累积 4：
+MiniOneRec-RL fixed-reference 实验。当前 trainer 已采用 rank-local 生成，与官方
+MiniOneRec 默认 non-vLLM 路径一致。配置为 micro-batch 32、梯度累积 4，全局
+generation/effective batch 为 512：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 DIPREC_DDP=1 \
 DIPREC_NUM_PROCESSES=4 \
 bash scripts/run_experiment.sh \
   --method minionerec_rl \
   --dataset Office_Products \
   --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4 \
+  --run_tag rl_fixed_ref_4gpu_eb512 \
   --baseline_rl_reference_mode fixed \
   --baseline_rl_per_device_batch_size 32 \
   --baseline_rl_gradient_accumulation_steps 4 \
@@ -292,12 +289,9 @@ bash scripts/run_experiment.sh \
 每个 rank 生成 512 / 4 = 128 candidates = 8 个完整 group
 ```
 
-修复前由 rank 0 一次生成全部 512 个 candidate（32 个独立 prompt），其他 rank
-不生成；修复后四张卡分别生成本地 128 个 candidate（8 个 prompt）。TRL 会先组成
-整个 accumulation rollout 再调用生成，因此改成 micro-batch 8、累积 16 时，每卡
-仍会一次生成 128 个 candidate，只会增加较慢的 micro-step，不能进一步降低生成
-峰值。若每卡 128 个 candidate 仍然 OOM，必须降低全局 generation/effective batch，
-例如 batch 32、累积 2、generation batch 256；这会变成另一组有效 batch 实验。
+四张卡分别只生成本地 128 个 candidate（8 个 prompt）。如果后续出现“仍有空闲
+显存但申请连续显存失败”的碎片型 OOM，可以在命令前额外设置
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`；rank-local 生成不依赖该参数。
 
 它从以下 SFT checkpoint 初始化：
 
@@ -306,8 +300,8 @@ output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft
 ```
 
 RL checkpoint 和指标写入新的
-`seed_42_rl_fixed_ref_4gpu_ranklocal_eb512_mb32_ga4` 目录，既不会覆盖之前的单卡
-`seed_42_rl_fixed_ref`，也不会与本次失败的四卡目录混合。
+`seed_42_rl_fixed_ref_4gpu_eb512` 目录，不会覆盖之前的单卡
+`seed_42_rl_fixed_ref`。
 
 实验 3 完成并确认 fixed-reference 大 batch 的效果后，再运行同规模的
 periodic-sync 对照；不要同时占用这四张卡启动第二个任务。
