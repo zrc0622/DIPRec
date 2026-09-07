@@ -8,6 +8,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RunnerContractTest(unittest.TestCase):
+    def test_prefix_pilot_controls_and_validation_only_evaluation(self):
+        result = subprocess.run([
+            'bash', 'scripts/run_experiment.sh', '--method', 'minionerec_rl',
+            '--dataset', 'Office', '--sft_run_tag', 'sft6e_lr1e-4_best',
+            '--baseline_rl_reward_mode', 'main_miss_prefix',
+            '--baseline_rl_prefix_reward_strength', '0.1',
+            '--baseline_rl_stop_after_steps', '1000', '--baseline_rl_diagnostics',
+            '--eval_split', 'valid', '--dry_run',
+        ], cwd=ROOT, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for flag in ('--reward_mode main_miss_prefix', '--prefix_reward_strength 0.1',
+                     '--stop_after_steps 1000', '--diagnostics_file', '--split valid'):
+            self.assertIn(flag, result.stdout)
+        self.assertNotIn('--split test', result.stdout)
+
     def test_all_comparisons_order_is_dependency_safe(self):
         script = (ROOT / "scripts/run_all_comparisons.sh").read_text(encoding="utf-8")
         self.assertIn(

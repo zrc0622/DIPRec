@@ -1,6 +1,6 @@
 # DIPRec 实验历史台账
 
-最后更新：2026-09-05
+最后更新：2026-09-07
 
 本文只记录已经实际运行过的实验，以及当前已经确定但尚未运行的下一组实验。
 训练产物中的 `training_config`、逐 epoch 日志和评测指标优先级最高；README
@@ -27,8 +27,8 @@ output_dir/<dataset>/history_50/Qwen_Qwen3-0.6B/<method>/<run_id>/
 
 ## 2. 已完成实验总表
 
-表中 `Val/Test` 均为生成评测结果；SFT 的 `best epoch` 是训练 loss 选择的
-checkpoint，RL 没有 best-checkpoint 选择，评测的是最后一轮。
+表中 `Val/Test` 均为生成评测结果；SFT 的 `best epoch` 是验证 loss 选择的
+checkpoint，RL 没有 best-checkpoint 选择，评测的是训练停止时的 checkpoint。
 
 | ID | 数据集 | 方法 / 变量 | best epoch | Val R@10 | Test R@10 | Test NDCG@10 |
 |---|---|---|---:|---:|---:|---:|
@@ -42,6 +42,7 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是最后一轮。
 | OP-RL-S1 | Office Products | MiniOneRec-RL，periodic sync | final | 0.20304 | 0.14550 | 0.10432 |
 | OP-RL-F4 | Office Products | MiniOneRec-RL，mixed-task fixed reference，四卡 | final | 0.22236 | 0.16584 | 0.12580 |
 | OP-RL-H1 | Office Products | MiniOneRec-RL，history-only，四卡 | final | 0.22544 | 0.16482 | 0.12644 |
+| OP-RL-C1 | Office Products | MiniOneRec-RL，保守 mixed，四卡一轮 | final | 0.23469 | 0.17078 | 0.12934 |
 
 ### 当前结论
 
@@ -55,8 +56,8 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是最后一轮。
   明显下降；旧 RL 每次更新只有 2 个完整 GRPO group，约 76%--78% 的验证 group
   reward 标准差为零，sync 还出现过很大的 KL 尖峰。
 - 四卡 history-only RL 与四卡 mixed-task RL 基本持平，仍低于 SFT parent；去掉
-  三类辅助任务没有消除负收益，下一组恢复 `official_mixed` 并仅测试更保守的优化
-  配置。
+  三类辅助任务没有消除负收益。保守 mixed 配置已完成，接近 SFT 但没有建立正向
+  收益；下一组固定这些条件，比较原奖励与主任务全未命中组的前缀辅助信号。
 
 ## 3. Video Games：MiniOneRec-SFT 学习率实验
 
@@ -371,9 +372,9 @@ history-only 更好，而且两种 RL 都低于 SFT parent。因此“辅助任�
 负收益的主因，不再把 history-only 作为下一步推荐方向。该实验没有改变稀疏
 reward，约 76% 的零方差 group 问题仍然存在。
 
-## 10. 待运行：1-epoch 保守版 mixed-task MiniOneRec-RL
+## 10. 已完成：1-epoch 保守版 mixed-task MiniOneRec-RL
 
-下一组恢复官方四任务 `official_mixed`，继续使用第 8 节的 SFT parent、reward、
+该组恢复官方四任务 `official_mixed`，继续使用第 8 节的 SFT parent、reward、
 `G=16`、fixed reference 和四卡 effective batch 256，只改变三个优化参数：
 
 ```text
@@ -410,16 +411,24 @@ bash scripts/run_experiment.sh \
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256/
 ```
 
-这是一项纯调参诊断，不修改 reward。它检验此前的负收益是否主要来自 LR 过大、
-KL 约束过弱和训练过久造成的 policy drift。首要判据是 Valid NDCG@10 是否超过
-SFT parent 的 `0.19000`，其次看 Valid Recall@10 是否超过 `0.23592`。即使它只
-比旧 RL 更接近 SFT，也不能称为 RL 正收益。由于这组实验不会减少约 76% 的
-零方差 reward group，若仍未超过 SFT，下一步应修改 reward，而不是继续减少
-epoch。
+已复制并核验的最终结果：
+
+| checkpoint | Valid R@10 | Valid NDCG@10 | Test R@10 | Test NDCG@10 |
+|---|---:|---:|---:|---:|
+| SFT parent | 0.23592 | 0.19000 | 0.17098 | 0.12972 |
+| 保守 mixed RL | 0.23469 | 0.18978 | 0.17078 | 0.12934 |
+
+保守配置显著减少常规 RL 的退化，但没有建立超过 SFT 的收益；既有用户配对
+bootstrap 区间跨零。本组未修改奖励，不能证明稀疏奖励是唯一失败原因。
+
+2026-09-07 审计补充：前文约 76% 的零方差统计不能泛化为全部训练步。
+找回完整单卡训练日志后，fixed/sync 全程零方差组均值为 61.76%/66.74%；
+纯主推荐批次为 60.10%/65.07%。四卡完整逐步日志仍缺失。官方也共享稀疏奖励，
+优化器/reference 精度等执行差异仍存在，尚未识别唯一或首要因果根源。
 
 ## 11. 证据完整性
 
-- Office Products 的 9 个已完成 run 均有 `metrics.json`、`valid_metrics.json`
+- 已保存的 Office Products 运行具有 `metrics.json`、`valid_metrics.json`
   和训练指标文件，命令参数由其中的 `training_config` 交叉验证。
 - Video Games `1e-4` 完整结果可从 Git 历史中的 `outputs.zip` 读取；当前工作树
   中该 zip 已被删除，本文没有恢复它。
@@ -427,3 +436,72 @@ epoch。
   metrics，因此本文不填写无法验证的最终数值。
 - 若用相同 run tag 在保留 checkpoint 的服务器上重新执行 SFT，runner 会拒绝
   覆盖；复跑时应给 `--run_tag` 增加新的后缀。
+
+## 12. 已实现、待训练：主推荐全未命中组的前缀辅助优势
+
+用户授权修改实现、README 和实验历史。默认 `official` 不改变；显式选择
+`main_miss_prefix` 才启用以下规则：
+
+```text
+h = 0.5 * I(first SID level matches) + 0.5 * I(first two SID levels match)
+if task == history_sid_to_sid and no exact hit in the group:
+    A = A_official + 0.1 * (h - mean(h))
+else:
+    A = A_official
+```
+
+原 all-miss 组的 `A_official=0`；辅助项不再按 std 归一化，避免强度系数抵消。
+命中组、其他三类任务、KL、SFT、optimizer/reference 均保持原行为。
+这是奖励/优势改进实验，不是声称官方执行已完全一致；分层 SID 奖励本身也已有
+上游 GPR 扩展示例。
+
+首个 A/B：两组相同保守超参数、同一现有 SFT、seed42、G16、四任务，均在
+1,000 个 optimizer updates 停止，保留一轮 scheduler 总步数，只评测 Valid。
+本轮采用固定停止步的 final checkpoint；尚未实现 250/500/1000 多 checkpoint
+的自动 Recall/NDCG 选优，避免把周期 RL eval_loss 当成排名指标。
+
+```bash
+for reward_mode in official main_miss_prefix; do
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 \
+  bash scripts/run_experiment.sh \
+    --method minionerec_rl \
+    --dataset Office_Products \
+    --model Qwen/Qwen3-0.6B --max_history_len 50 --seed 42 \
+    --sft_run_tag sft6e_lr1e-4_best \
+    --run_tag "rl_prefix_ab_${reward_mode}_s1000_lr2e-6_beta1e-2_4gpu_eb256" \
+    --baseline_rl_task_scope official_mixed \
+    --baseline_rl_reference_mode fixed \
+    --baseline_rl_per_device_batch_size 16 \
+    --baseline_rl_gradient_accumulation_steps 4 \
+    --baseline_rl_generation_batch_size 256 \
+    --baseline_rl_learning_rate 2e-6 \
+    --baseline_rl_beta 1e-2 \
+    --baseline_rl_num_epochs 1 \
+    --baseline_rl_reward_mode "$reward_mode" \
+    --baseline_rl_prefix_reward_strength 0.1 \
+    --baseline_rl_stop_after_steps 1000 \
+    --baseline_rl_diagnostics \
+    --eval_split valid || break
+done
+```
+
+新输出目录位于：
+
+```text
+outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/
+  seed_42_rl_prefix_ab_official_s1000_lr2e-6_beta1e-2_4gpu_eb256/
+  seed_42_rl_prefix_ab_main_miss_prefix_s1000_lr2e-6_beta1e-2_4gpu_eb256/
+```
+
+`rl_diagnostics.jsonl` 持久化 train/eval 日志和逐任务辅助信号统计；
+原 `rl_training_metrics.json` 保持 eval-only。原 reward/zero-std 字段只描述
+exact+rank，新增 `prefix_aux/.../aux_active` 才表示辅助信号是否实际启用。
+训练 metadata 记录 reward mode、strength、stop_after_steps、完成步数和计划总步数。
+
+**状态：实现完成，68 项 CPU 检查和双进程 TRL 生命周期验证通过；两组文档命令
+dry-run 通过。生产 GPU 训练尚未开始，指标待填。**
+前轮离线验证 Top10 诊断的 23.59%→41.02% 只是奖励差异覆盖，不能当作训练
+覆盖率或 Recall 改善。成功判据是固定步数下 Valid NDCG@10/Recall@10 相对
+同预算原奖励和 SFT 的表现；只提高 prefix 命中不算成功，当前不使用 test 调参。

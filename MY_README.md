@@ -220,81 +220,91 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 
 ### 3. RL
 
-Run the **one-epoch conservative MiniOneRec-RL** experiment next. The completed
-history-only ablation did not improve over SFT: it is effectively tied with
-mixed-task RL, and both are below their SFT parent. This run therefore restores
-the official four-task `official_mixed` scope and changes only the optimization
-strength: learning rate `1e-5 -> 2e-6`, KL beta `1e-3 -> 1e-2`, and epochs
-`2 -> 1`. The SFT checkpoint, sparse exact/rank-aware reward, `G=16`, fixed
-reference, and four-GPU effective batch 256 remain unchanged.
+The next experiment compares **official rewards vs prefix assistance on all-miss
+recommendation groups**. The conservative mixed run is complete: Valid
+Recall@10=`0.23469`, NDCG@10=`0.18978`, close to but below the SFT parent's
+`0.23592/0.19000`. Keep the existing SFT, seed42, Qwen3, history50, all four tasks,
+sampling, optimizer, and reference fixed across both arms.
 
-This is a pure hyperparameter diagnostic. It tests whether smaller updates,
-stronger KL control, and a shorter run prevent harmful policy drift. It does
-not fix the roughly 76% of GRPO groups with zero reward variance; if it still
-fails to beat SFT, the next change should target the reward rather than reduce
-the epoch count again.
+- `official` (default): exact + rank rewards with the existing group normalization.
+- `main_miss_prefix`: add assistance only when a `history_sid_to_sid` group has
+  no exact hit. Hit groups and the other three tasks retain their original advantages.
+- Define `h = 0.5 × first-level match + 0.5 × first-two-level prefix match`.
+  Add `λ × (h - group_mean(h))`, initially `λ=0.1`. Do not divide the auxiliary
+  term by group std: its coefficient must control actual strength. Uniform
+  prefix scores add no signal. The KL term is unchanged.
 
-The trainer uses rank-local generation, matching upstream MiniOneRec's default
-non-vLLM path. Run on GPUs 0--3:
+This optional method change has no trained-model results yet. Saved SFT validation
+Top10 candidates show informative-group coverage increasing from 23.59% to 41.02%;
+that offline proxy is neither training G16 coverage nor a Recall improvement.
+
+Run two independent 1,000-update pilots from the same existing SFT. The stop callback
+preserves the full one-epoch cosine schedule; it does not shorten the scheduler to
+1,000 updates. Use `0` or omit the stop option for a full epoch. Both arms evaluate
+the checkpoint at the same stopping step, without selecting by RL eval_loss.
+`--eval_split valid` evaluates only validation recommendations and defers test evaluation.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-DIPREC_DDP=1 \
-DIPREC_NUM_PROCESSES=4 \
-bash scripts/run_experiment.sh \
-  --method minionerec_rl \
-  --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256 \
-  --baseline_rl_task_scope official_mixed \
-  --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 16 \
-  --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 256 \
-  --baseline_rl_learning_rate 2e-6 \
-  --baseline_rl_beta 1e-2 \
-  --baseline_rl_num_epochs 1
+for reward_mode in official main_miss_prefix; do
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 \
+  bash scripts/run_experiment.sh \
+    --method minionerec_rl \
+    --dataset Office_Products \
+    --model Qwen/Qwen3-0.6B --max_history_len 50 --seed 42 \
+    --sft_run_tag sft6e_lr1e-4_best \
+    --run_tag "rl_prefix_ab_${reward_mode}_s1000_lr2e-6_beta1e-2_4gpu_eb256" \
+    --baseline_rl_task_scope official_mixed \
+    --baseline_rl_reference_mode fixed \
+    --baseline_rl_per_device_batch_size 16 \
+    --baseline_rl_gradient_accumulation_steps 4 \
+    --baseline_rl_generation_batch_size 256 \
+    --baseline_rl_learning_rate 2e-6 \
+    --baseline_rl_beta 1e-2 \
+    --baseline_rl_num_epochs 1 \
+    --baseline_rl_reward_mode "$reward_mode" \
+    --baseline_rl_prefix_reward_strength 0.1 \
+    --baseline_rl_stop_after_steps 1000 \
+    --baseline_rl_diagnostics \
+    --eval_split valid || break
+done
 ```
 
-This gives:
+The four-GPU configuration gives `4 × 16 × 4 = 256` candidates/update, or 16 G16
+prompt groups. Each rank generates 64 candidates (4 groups). Prefix advantages are
+computed before TRL shuffles and splits microbatches. If batch settings need changing,
+change both arms and use fresh run tags.
 
-```text
-4 GPUs x 16 candidates/GPU x 4 accumulation steps = 256 candidates/update
-256 / 16 generations = 16 complete GRPO prompt groups/update
-Each rank generates 256 / 4 = 64 candidates = 4 complete groups/rollout
-```
-
-Each rank generates only its local 64 candidates (4 prompts). The allocator
-setting reduces fragmentation but does not change the effective batch. If this
-configuration still OOMs, use batch 16, accumulation 2, and generation batch
-128 with a new run tag.
-
-On Office Products, `official_mixed` contains 55,290 rows: 38,924
-`history_sid_to_sid` rows and 16,366 title/description auxiliary rows. The
-command spells out task scope, learning rate, beta, and epoch count instead of
-depending on historical defaults. When omitted, the runner retains the old
-`1e-5`, `1e-3`, and two-epoch defaults for reproducibility.
-
-The job initializes from:
+SFT parent:
 
 ```text
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-Its checkpoint and metrics use the new
-`seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256` directory and do
-not overwrite prior runs. Current controls are:
+The two new run tags start with `rl_prefix_ab_official_...` and
+`rl_prefix_ab_main_miss_prefix_...`. Saved training metadata includes reward mode,
+strength, completed updates and scheduler total steps. Historical defaults remain
+official rewards, LR1e-5, beta1e-3, and two epochs; the command explicitly selects
+the conservative configuration. Direct `train_baseline_grpo.py` controls are
+`--reward_mode`, `--prefix_reward_strength`, `--stop_after_steps`, and
+`--diagnostics_file`; both public experiment runners forward these options.
 
-| checkpoint | Valid R@10 / NDCG@10 | Test R@10 / NDCG@10 |
-|---|---:|---:|
-| SFT parent | 0.23592 / 0.19000 | 0.17098 / 0.12972 |
-| two-epoch mixed RL | 0.22236 / 0.18418 | 0.16584 / 0.12580 |
-| two-epoch history-only RL | 0.22544 / 0.18481 | 0.16482 / 0.12644 |
+`--baseline_rl_diagnostics` additionally writes train/eval entries to
+`rl_diagnostics.jsonl`. Per-task `prefix_aux/<task>/exact_hit`, `eligible`,
+`prefix_informative`, and `aux_active` report fractions of all groups of that task:
+exact hits, eligible all-miss recommendation groups, eligible groups with distinct
+prefix scores, and groups receiving nonzero auxiliary advantages. `prefix_mean`,
+`aux_abs_mean`, and `aux_abs_max` report signal magnitudes. The baseline records
+prefix diagnostics too, with `aux_active=0`. Existing `reward` and
+`frac_reward_zero_std` still describe only exact+rank. Logging defaults to every
+step; with larger log intervals, aggregated diagnostics average batch statistics.
 
-The new run should first recover at least the SFT Valid NDCG@10 of `0.19000`.
-A smaller degradation from training for less time must not be reported as a
-positive RL gain.
+Compare Valid NDCG@10 first, Recall@10 and hits gained/lost relative to SFT second,
+at the fixed 1,000-update endpoint. Prefix scores and periodic RL eval_loss do not
+select a best checkpoint. Expand both arms to one epoch with fresh tags only after
+actual recommendation metrics improve. Prefix-only gains do not establish success.
+See [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md) for the experiment ledger.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These

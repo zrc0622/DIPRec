@@ -30,7 +30,8 @@ from .prompts import (
     title_to_sid_prompt,
 )
 from .runtime import load_model_runtime, require_replicated_generation_backend, set_seed
-from .rl_logging import PersistentRLTrainingMetricsCallback
+from .rl_logging import PersistentRLTrainingMetricsCallback, RLDiagnosticsCallback, StopAfterStepsCallback
+from .prefix_reward import REWARD_MODES, RL_TASKS, prefix_group_signal, validate_prefix_reward
 from .sft import catalog_alignment_maps
 
 RL_METHODS = ("direct_rl", "minionerec_rl")
@@ -373,8 +374,16 @@ def _catalog_trainer_class(base_class: type):
     """Create the pinned TRL 0.24 trainer override lazily for dependency-free dry-runs."""
 
     class CatalogGRPOTrainer(base_class):
-        def __init__(self, *args: Any, sid_trie: Any, **kwargs: Any):
+        def __init__(
+            self, *args: Any, sid_trie: Any, reward_mode: str = "official",
+            prefix_reward_strength: float = 0.1, reward_diagnostics: bool = False,
+            **kwargs: Any,
+        ):
+            validate_prefix_reward(reward_mode, prefix_reward_strength)
             self.sid_trie = sid_trie
+            self.reward_mode = reward_mode
+            self.prefix_reward_strength = prefix_reward_strength
+            self.reward_diagnostics = reward_diagnostics
             super().__init__(*args, **kwargs)
             require_replicated_generation_backend(self, "Catalog beam rollout")
             baseline_batch_contract(
@@ -388,6 +397,51 @@ def _catalog_trainer_class(base_class: type):
             )
             if self.use_vllm:
                 raise ValueError("CatalogGRPOTrainer requires use_vllm=False")
+
+        def _generate_and_score_completions(self, inputs):
+            output = super()._generate_and_score_completions(inputs)
+            if self.reward_mode == "official" and not self.reward_diagnostics:
+                return output
+            # Catalog generation guarantees full local groups; apply before
+            # TRL shuffles/splits them across accumulation microsteps.
+            for start in range(0, len(inputs), self.num_generations):
+                group = inputs[start : start + self.num_generations]
+                if any(row["prompt"] != group[0]["prompt"] or
+                       row.get("sample_id") != group[0].get("sample_id") for row in group):
+                    raise ValueError("Prefix assistance received a noncontiguous prompt group")
+            completions = self.processing_class.batch_decode(
+                output["completion_ids"], skip_special_tokens=True
+            )
+            strength = self.prefix_reward_strength if self.reward_mode == "main_miss_prefix" else 0.0
+            deltas, local_groups = prefix_group_signal(
+                completions, [row["target_sid"] for row in inputs],
+                [row["task"] for row in inputs], self.num_generations, strength,
+            )
+            if strength > 0:
+                output["advantages"] = output["advantages"] + output["advantages"].new_tensor(deltas)
+            from accelerate.utils import gather_object
+
+            groups = gather_object(local_groups)
+            mode = "train" if self.model.training else "eval"
+            for task in RL_TASKS:
+                selected = [g for g in groups if g["task"] == task]
+                if not selected:
+                    continue
+                metrics = self._metrics[mode]
+                prefix = f"prefix_aux/{task}"
+                metrics[f"{prefix}/groups"].append(len(selected))
+                for key in ("exact_hit", "eligible", "prefix_informative", "aux_active",
+                            "prefix_mean", "aux_abs_mean"):
+                    metrics[f"{prefix}/{key}"].append(sum(g[key] for g in selected) / len(selected))
+                metrics[f"{prefix}/aux_abs_max"].append(max(g["aux_abs_max"] for g in selected))
+            if strength > 0:
+                # Base TRL already logged the unmodified advantages. Replace
+                # this rollout's tail so completion logs show the actual signal.
+                actual = self.accelerator.gather(output["advantages"]).tolist()
+                previous = list(self._logs["advantages"])[:-len(actual)]
+                self._logs["advantages"].clear()
+                self._logs["advantages"].extend(previous + actual)
+            return output
 
         def _generate_single_turn(self, prompts: list[str], images: list[Any] | None):
             import torch
@@ -488,6 +542,9 @@ def _manifest_for(split_path: Path) -> dict[str, Any]:
 
 
 def train(args: argparse.Namespace) -> None:
+    validate_prefix_reward(args.reward_mode, args.prefix_reward_strength)
+    if args.stop_after_steps < 0:
+        raise ValueError("--stop_after_steps must be non-negative")
     set_seed(args.seed)
     method = canonical_rl_method(args.method)
     train_path = Path(args.train_file)
@@ -584,6 +641,11 @@ def train(args: argparse.Namespace) -> None:
                     "generation": generation_kwargs,
                     "batch": batch_contract,
                     "reference_policy": reference_policy,
+                    "reward_mode": args.reward_mode,
+                    "prefix_reward_strength": args.prefix_reward_strength,
+                    "prefix_advantage_normalization": "center_only_after_official_advantage",
+                    "stop_after_steps": args.stop_after_steps,
+                    "diagnostics_file": args.diagnostics_file,
                     "use_vllm": False,
                     "train_history": train_history,
                     "valid_history": valid_history,
@@ -672,6 +734,9 @@ def train(args: argparse.Namespace) -> None:
         model=model,
         processing_class=tokenizer,
         sid_trie=trie,
+        reward_mode=args.reward_mode,
+        prefix_reward_strength=args.prefix_reward_strength,
+        reward_diagnostics=bool(args.diagnostics_file),
         reward_funcs=[exact_match_reward, make_rank_aware_reward(args.num_generations)],
         train_dataset=train_dataset,
         eval_dataset=valid_dataset,
@@ -679,6 +744,10 @@ def train(args: argparse.Namespace) -> None:
     )
     if args.training_metrics_file:
         trainer.add_callback(PersistentRLTrainingMetricsCallback(args.training_metrics_file))
+    if args.diagnostics_file:
+        trainer.add_callback(RLDiagnosticsCallback(args.diagnostics_file))
+    if args.stop_after_steps:
+        trainer.add_callback(StopAfterStepsCallback(args.stop_after_steps))
     trainer.train()
     trainer.accelerator.wait_for_everyone()
     if trainer.accelerator.is_main_process:
@@ -698,6 +767,9 @@ def train(args: argparse.Namespace) -> None:
             "generation": generation_kwargs,
             "batch": batch_contract,
             "reference_policy": reference_policy,
+            "prefix_advantage_normalization": "center_only_after_official_advantage",
+            "completed_optimizer_steps": trainer.state.global_step,
+            "scheduler_total_steps": trainer.state.max_steps,
             "use_vllm": False,
         }
         Path(args.output_dir, "training_config.json").write_text(
@@ -722,6 +794,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_history_len", type=int, default=50, choices=(10, 20, 50))
     parser.add_argument("--max_seq_len", type=int, default=2048)
     parser.add_argument("--title_sequence_limit", type=int, default=10_000)
+    parser.add_argument("--reward_mode", choices=REWARD_MODES, default="official")
+    parser.add_argument("--prefix_reward_strength", type=float, default=0.1,
+                        help="Bounded centered prefix advantage on main-task all-miss groups only")
+    parser.add_argument("--diagnostics_file", help="Optional append-only train/eval diagnostics JSONL")
+    parser.add_argument("--stop_after_steps", type=int, default=0,
+                        help="Stop after this many optimizer updates; 0 runs all epochs. LR schedule is unchanged.")
     parser.add_argument(
         "--task_scope",
         choices=BASELINE_RL_TASK_SCOPES,

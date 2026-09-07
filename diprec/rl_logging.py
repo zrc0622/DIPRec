@@ -10,6 +10,35 @@ from typing import Any
 from transformers import TrainerCallback
 
 
+class RLDiagnosticsCallback(TrainerCallback):
+    """Append train/eval metrics without changing the legacy eval-only JSON."""
+
+    def __init__(self, destination: str | Path) -> None:
+        self.destination = Path(destination)
+
+    def on_log(self, args: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        if not state.is_world_process_zero:
+            return
+        self.destination.parent.mkdir(parents=True, exist_ok=True)
+        entry = dict(kwargs.get("logs") or {}, step=state.global_step, epoch=state.epoch)
+        with self.destination.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+class StopAfterStepsCallback(TrainerCallback):
+    """Stop a pilot at an update boundary without shortening its LR schedule."""
+
+    def __init__(self, steps: int) -> None:
+        if steps < 1:
+            raise ValueError("stop_after_steps must be positive")
+        self.steps = steps
+
+    def on_step_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
+        if state.global_step >= self.steps:
+            control.should_training_stop = True
+        return control
+
+
 class PersistentRLTrainingMetricsCallback(TrainerCallback):
     """Atomically persist only periodic evaluation results outside checkpoints."""
 

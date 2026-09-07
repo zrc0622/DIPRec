@@ -43,6 +43,11 @@ BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
 BASELINE_RL_EVAL_STEPS=0.1
 BASELINE_RL_TASK_SCOPE="official_mixed"
+BASELINE_RL_REWARD_MODE="official"
+BASELINE_RL_PREFIX_REWARD_STRENGTH=0.1
+BASELINE_RL_STOP_AFTER_STEPS=0
+BASELINE_RL_DIAGNOSTICS=0
+EVAL_SPLIT="both"
 DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
 DIPREC_RL_GENERATION_BATCH_SIZE=""
 DIPREC_RL_GRADIENT_ACCUMULATION_STEPS=8
@@ -92,6 +97,11 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
     --baseline_rl_eval_steps) BASELINE_RL_EVAL_STEPS="$2"; shift 2 ;;
     --baseline_rl_task_scope) BASELINE_RL_TASK_SCOPE="$2"; shift 2 ;;
+    --baseline_rl_reward_mode) BASELINE_RL_REWARD_MODE="$2"; shift 2 ;;
+    --baseline_rl_prefix_reward_strength) BASELINE_RL_PREFIX_REWARD_STRENGTH="$2"; shift 2 ;;
+    --baseline_rl_stop_after_steps) BASELINE_RL_STOP_AFTER_STEPS="$2"; shift 2 ;;
+    --baseline_rl_diagnostics) BASELINE_RL_DIAGNOSTICS=1; shift ;;
+    --eval_split) EVAL_SPLIT="$2"; shift 2 ;;
     --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_gradient_accumulation_steps) DIPREC_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -155,6 +165,10 @@ for dataset in "${DATASETS[@]}"; do
         --baseline_rl_ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
         --baseline_rl_ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"
         --baseline_rl_task_scope "$BASELINE_RL_TASK_SCOPE"
+        --baseline_rl_reward_mode "$BASELINE_RL_REWARD_MODE"
+        --baseline_rl_prefix_reward_strength "$BASELINE_RL_PREFIX_REWARD_STRENGTH"
+        --baseline_rl_stop_after_steps "$BASELINE_RL_STOP_AFTER_STEPS"
+        --eval_split "$EVAL_SPLIT"
         --baseline_rl_eval_steps "$BASELINE_RL_EVAL_STEPS"
         --diprec_rl_per_device_batch_size "$DIPREC_RL_PER_DEVICE_BATCH_SIZE"
         --diprec_rl_gradient_accumulation_steps "$DIPREC_RL_GRADIENT_ACCUMULATION_STEPS"
@@ -162,6 +176,9 @@ for dataset in "${DATASETS[@]}"; do
         --diprec_rl_beta "$DIPREC_RL_BETA"
         --diprec_rl_eval_steps "$DIPREC_RL_EVAL_STEPS"
         --seed "$seed")
+      if [[ "$BASELINE_RL_DIAGNOSTICS" -eq 1 ]]; then
+        args+=(--baseline_rl_diagnostics)
+      fi
       if [[ -n "$DIPREC_RL_GENERATION_BATCH_SIZE" ]]; then
         args+=(--diprec_rl_generation_batch_size "$DIPREC_RL_GENERATION_BATCH_SIZE")
       fi

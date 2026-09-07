@@ -47,6 +47,11 @@ BASELINE_RL_REF_MODEL_SYNC_STEPS=512
 BASELINE_RL_REF_MODEL_MIXUP_ALPHA=0.6
 BASELINE_RL_EVAL_STEPS=0.1
 BASELINE_RL_TASK_SCOPE="official_mixed"
+BASELINE_RL_REWARD_MODE="official"
+BASELINE_RL_PREFIX_REWARD_STRENGTH=0.1
+BASELINE_RL_STOP_AFTER_STEPS=0
+BASELINE_RL_DIAGNOSTICS=0
+EVAL_SPLIT="both"
 DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
 DIPREC_RL_GENERATION_BATCH_SIZE=""
 DIPREC_RL_GRADIENT_ACCUMULATION_STEPS=8
@@ -105,6 +110,11 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_ref_model_mixup_alpha) BASELINE_RL_REF_MODEL_MIXUP_ALPHA="$2"; shift 2 ;;
     --baseline_rl_eval_steps) BASELINE_RL_EVAL_STEPS="$2"; shift 2 ;;
     --baseline_rl_task_scope) BASELINE_RL_TASK_SCOPE="$2"; shift 2 ;;
+    --baseline_rl_reward_mode) BASELINE_RL_REWARD_MODE="$2"; shift 2 ;;
+    --baseline_rl_prefix_reward_strength) BASELINE_RL_PREFIX_REWARD_STRENGTH="$2"; shift 2 ;;
+    --baseline_rl_stop_after_steps) BASELINE_RL_STOP_AFTER_STEPS="$2"; shift 2 ;;
+    --baseline_rl_diagnostics) BASELINE_RL_DIAGNOSTICS=1; shift ;;
+    --eval_split) EVAL_SPLIT="$2"; shift 2 ;;
     --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_gradient_accumulation_steps) DIPREC_RL_GRADIENT_ACCUMULATION_STEPS="$2"; shift 2 ;;
@@ -138,6 +148,14 @@ esac
 case "$BASELINE_RL_TASK_SCOPE" in
   official_mixed|history_only) ;;
   *) echo "--baseline_rl_task_scope must be official_mixed or history_only" >&2; exit 2 ;;
+esac
+case "$BASELINE_RL_REWARD_MODE" in
+  official|main_miss_prefix) ;;
+  *) echo "--baseline_rl_reward_mode must be official or main_miss_prefix" >&2; exit 2 ;;
+esac
+case "$EVAL_SPLIT" in
+  both|valid) ;;
+  *) echo "--eval_split must be both or valid" >&2; exit 2 ;;
 esac
 case "$SFT_PLAN_MODE" in
   single|diverse) ;;
@@ -421,12 +439,18 @@ run_baseline_rl() {
     --ref_model_sync_steps "$BASELINE_RL_REF_MODEL_SYNC_STEPS"
     --ref_model_mixup_alpha "$BASELINE_RL_REF_MODEL_MIXUP_ALPHA"
     --task_scope "$BASELINE_RL_TASK_SCOPE"
+    --reward_mode "$BASELINE_RL_REWARD_MODE"
+    --prefix_reward_strength "$BASELINE_RL_PREFIX_REWARD_STRENGTH"
+    --stop_after_steps "$BASELINE_RL_STOP_AFTER_STEPS"
     --eval_steps "$BASELINE_RL_EVAL_STEPS"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"
     --seed "$SEED")
   if [[ -n "$BASELINE_RL_GENERATION_BATCH_SIZE" ]]; then
     cmd+=(--generation_batch_size "$BASELINE_RL_GENERATION_BATCH_SIZE")
+  fi
+  if [[ "$BASELINE_RL_DIAGNOSTICS" -eq 1 ]]; then
+    cmd+=(--diagnostics_file "$RUN_DIR/rl_diagnostics.jsonl")
   fi
   if [[ "$rl_method" == "minionerec_rl" ]]; then
     cmd+=(--item_meta "$ITEM_META")
@@ -536,17 +560,23 @@ case "$METHOD" in
     ;;
 esac
 if [[ "$DRY_RUN" -eq 1 ]]; then EVAL_CMD+=(--dry_run); fi
-if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/test.jsonl" ]]; then
-  printf '[dry-run] '; printf '%q ' "${EVAL_CMD[@]}"; printf '\n'
+VALID_CMD=("${EVAL_CMD[@]}")
+for index in "${!VALID_CMD[@]}"; do
+  case "${VALID_CMD[$index]}" in
+    "$DATA_DIR/test.jsonl") VALID_CMD[$index]="$DATA_DIR/valid.jsonl" ;;
+    "$RUN_DIR/metrics.json") VALID_CMD[$index]="$RUN_DIR/valid_metrics.json" ;;
+    test) VALID_CMD[$index]=valid ;;
+  esac
+done
+if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/valid.jsonl" ]]; then
+  printf '[dry-run] '; printf '%q ' "${VALID_CMD[@]}"; printf '\n'
 else
-  VALID_CMD=("${EVAL_CMD[@]}")
-  for index in "${!VALID_CMD[@]}"; do
-    case "${VALID_CMD[$index]}" in
-      "$DATA_DIR/test.jsonl") VALID_CMD[$index]="$DATA_DIR/valid.jsonl" ;;
-      "$RUN_DIR/metrics.json") VALID_CMD[$index]="$RUN_DIR/valid_metrics.json" ;;
-      test) VALID_CMD[$index]=valid ;;
-    esac
-  done
   "${VALID_CMD[@]}"
-  "${EVAL_CMD[@]}"
+fi
+if [[ "$EVAL_SPLIT" == "both" ]]; then
+  if [[ "$DRY_RUN" -eq 1 && ! -f "$DATA_DIR/test.jsonl" ]]; then
+    printf '[dry-run] '; printf '%q ' "${EVAL_CMD[@]}"; printf '\n'
+  else
+    "${EVAL_CMD[@]}"
+  fi
 fi

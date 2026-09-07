@@ -4,6 +4,8 @@
 
 > **DIPRec RL 修正说明：** `diprec_traj_rl` / `diprec_plan_rl` 已迁移至 TRL 0.24：使用固定 DIPRec-SFT reference KL、复用 rollout 的多轮更新和有效 PPO clipping；`diprec_plan_rl` 仍保留 plan/SID 两级 advantage。
 
+> **MiniOneRec RL 奖励实验：** 新增可选 `main_miss_prefix`，仅为主推荐任务的整组未命中样本添加有界 SID 前缀辅助优势；默认仍使用原奖励。短程 A/B 命令见 [中文指南](MY_README_ZH.md#3-rl)，实验状态见 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
+
 This is the code implementation for **"SIDReasoner - Reasoning over Semantic IDs Enhances Generative Recommendation"**.
 
 SIDReasoner is a generative recommendation framework that strengthens generative recommenders with reasoning ability over semantic IDs. This repository provides:

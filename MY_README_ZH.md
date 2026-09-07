@@ -261,74 +261,81 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 ### 3. RL
 
-当前优先跑 **1-epoch 保守版 MiniOneRec-RL**。已完成的 history-only 消融并未
-改善 SFT：它与 mixed-task RL 基本持平，而且两者都低于 SFT parent。因此本次
-恢复官方四任务 `official_mixed`，只把学习率从 `1e-5` 降到 `2e-6`、KL beta 从
-`1e-3` 提到 `1e-2`、训练轮数从 2 降到 1。SFT checkpoint、稀疏
-exact/rank-aware reward、`G=16`、fixed reference 和四卡有效 batch 256 均不变。
+当前进行 **原奖励 vs 主任务全未命中组前缀辅助信号** 的短程 A/B 实验。
+保守版 mixed RL 已完成：Valid Recall@10=`0.23469`、NDCG@10=`0.18978`，
+接近但没有超过 SFT 的 `0.23592/0.19000`。本次固定现有 SFT、seed42、Qwen3、
+history50、四类任务、采样、优化器和 reference，仅比较奖励/优势处理。
 
-这是一项纯调参诊断：检验更小更新、更强 KL 约束和更短训练能否抑制策略漂移，
-使 RL 不再产生负收益。它不会解决约 76% 的 GRPO group reward 方差为零这一根本
-问题，因此若仍无提升，下一步应修改 reward，而不是继续缩短 epoch。
+- `official`（默认）：沿用 exact + rank 奖励和组内标准化。
+- `main_miss_prefix`：只有 `history_sid_to_sid` 的整组候选都没有正确 SID 时，
+  才增加辅助优势；已命中组和其他三类任务继续使用原优势。
+- 对候选计算 `h = 0.5 × 第一层匹配 + 0.5 × 前两层同时匹配`，新增优势为
+  `λ × (h - 组内平均 h)`，首轮 `λ=0.1`。辅助项不再除以标准差，保证系数
+  控制实际强度；全组前缀同分仍无辅助更新。KL 项保持原样。
 
-当前 trainer 使用 rank-local 生成，与官方 MiniOneRec 默认 non-vLLM 路径一致。
-使用 GPU 0--3 运行：
+这是方法改进开关，尚无训练收益。保存的 SFT 验证 Top10 上，可区分组比例由
+23.59% 增至 41.02%；这只是离线代理诊断，不能当成训练 G16 覆盖率或 Recall 提升。
+
+以下命令顺序运行两个独立的 1,000-update 对照，均从同一个已有 SFT 初始化。
+`stop_after_steps` 在 optimizer update 边界停止，不把一轮 cosine 的总步数压缩为
+1,000；取 `0` 或省略则跑完一轮。两组均评测停止时的 `final_checkpoint`，
+`--eval_split valid` 只做最终验证集推荐评测，暂不运行 test。
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-DIPREC_DDP=1 \
-DIPREC_NUM_PROCESSES=4 \
-bash scripts/run_experiment.sh \
-  --method minionerec_rl \
-  --dataset Office_Products \
-  --sft_run_tag sft6e_lr1e-4_best \
-  --run_tag rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256 \
-  --baseline_rl_task_scope official_mixed \
-  --baseline_rl_reference_mode fixed \
-  --baseline_rl_per_device_batch_size 16 \
-  --baseline_rl_gradient_accumulation_steps 4 \
-  --baseline_rl_generation_batch_size 256 \
-  --baseline_rl_learning_rate 2e-6 \
-  --baseline_rl_beta 1e-2 \
-  --baseline_rl_num_epochs 1
+for reward_mode in official main_miss_prefix; do
+  CUDA_VISIBLE_DEVICES=0,1,2,3 \
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  DIPREC_DDP=1 DIPREC_NUM_PROCESSES=4 \
+  bash scripts/run_experiment.sh \
+    --method minionerec_rl \
+    --dataset Office_Products \
+    --model Qwen/Qwen3-0.6B --max_history_len 50 --seed 42 \
+    --sft_run_tag sft6e_lr1e-4_best \
+    --run_tag "rl_prefix_ab_${reward_mode}_s1000_lr2e-6_beta1e-2_4gpu_eb256" \
+    --baseline_rl_task_scope official_mixed \
+    --baseline_rl_reference_mode fixed \
+    --baseline_rl_per_device_batch_size 16 \
+    --baseline_rl_gradient_accumulation_steps 4 \
+    --baseline_rl_generation_batch_size 256 \
+    --baseline_rl_learning_rate 2e-6 \
+    --baseline_rl_beta 1e-2 \
+    --baseline_rl_num_epochs 1 \
+    --baseline_rl_reward_mode "$reward_mode" \
+    --baseline_rl_prefix_reward_strength 0.1 \
+    --baseline_rl_stop_after_steps 1000 \
+    --baseline_rl_diagnostics \
+    --eval_split valid || break
+done
 ```
 
-该配置满足：
+该四卡配置每次更新包含 `4 × 16 × 4 = 256` 个候选，即 16 个 G16 prompt 组。
+每个 rank 生成 64 个候选（4 组），辅助优势在 TRL 打乱和拆分 microbatch 之前计算。
+如果需要换 batch，两个对照一起修改，并使用新 run tag。
 
-```text
-4 GPUs × 16 candidates/GPU × 4 accumulation steps = 256 candidates/update
-256 / 16 generations = 16 complete GRPO prompt groups/update
-每个 rank 生成 256 / 4 = 64 candidates = 4 个完整 group
-```
-
-四张卡分别只生成本地 64 个 candidate（4 个 prompt）。显存分配器设置用于减少
-碎片，不改变有效 batch。若该配置仍然 OOM，请换新 run tag，并进一步使用
-batch 16、累积 2、generation batch 128。
-
-`official_mixed` 在 Office Products 上包含 55,290 行：38,924 条
-`history_sid_to_sid`，以及 16,366 条 title/description 辅助任务。这里显式写出
-task scope、学习率、beta 和 epoch，避免依赖历史默认值；未显式覆盖时 runner 仍
-保持旧配方的 `1e-5`、`1e-3` 和 2 epochs，不影响旧实验复现。
-
-它从以下 SFT checkpoint 初始化：
+SFT parent：
 
 ```text
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-RL checkpoint 和指标写入新的
-`seed_42_rl_mixed_conservative_1e_lr2e-6_beta1e-2_4gpu_eb256` 目录，不会覆盖
-已有实验。当前对照结果如下：
+两个新目录分别使用 `rl_prefix_ab_official_...` 和 `rl_prefix_ab_main_miss_prefix_...`
+run tag；训练配置会保存 reward mode、辅助强度、完成步数和 scheduler 总步数。
+默认仍是原奖励、LR1e-5、beta1e-3、2 epochs；命令显式指定保守配置。
+底层 `train_baseline_grpo.py` 对应参数为 `--reward_mode`、`--prefix_reward_strength`、
+`--stop_after_steps`、`--diagnostics_file`，两个公开 runner 均转发这些控制。
 
-| checkpoint | Valid R@10 / NDCG@10 | Test R@10 / NDCG@10 |
-|---|---:|---:|
-| SFT parent | 0.23592 / 0.19000 | 0.17098 / 0.12972 |
-| 2-epoch mixed RL | 0.22236 / 0.18418 | 0.16584 / 0.12580 |
-| 2-epoch history-only RL | 0.22544 / 0.18481 | 0.16482 / 0.12644 |
+`--baseline_rl_diagnostics` 另外保存 `rl_diagnostics.jsonl`，包含逐次 train/eval
+日志。`prefix_aux/<task>/exact_hit` 是该任务组命中比例，`eligible` 是可使用辅助
+信号的组比例，`prefix_informative` 是原未命中组中前缀可区分的组占该任务全部组
+的比例，`aux_active` 是实际获得非零辅助优势的组比例，另有 `prefix_mean`、
+`aux_abs_mean`、`aux_abs_max`。基线也记录前缀诊断，但 `aux_active=0`。
+原 `reward`、`frac_reward_zero_std` 仍只描述 exact+rank；不要用它们判断新增优势
+是否生效。默认每步记录；调大 `log_every` 后汇总指标是各记录批次统计值的平均。
 
-新实验首先看 Valid NDCG@10 是否至少回到 SFT 的 `0.19000`；若没有，则不能把
-“少训一轮后退化较小”误写成 RL 有收益。
+固定 1,000 步比较 Valid NDCG@10（主指标）、Recall@10 和相对 SFT 的命中新增/丢失。
+周期 `eval_loss` 和前缀分数不用于选择 best checkpoint。只有真实推荐指标改善，
+才考虑两组都换新 tag 扩至一轮；只涨前缀命中不算成功。实验记录见
+[EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
