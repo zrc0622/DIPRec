@@ -1,6 +1,6 @@
 # DIPRec 实验历史台账
 
-最后更新：2026-09-07
+最后更新：2026-09-08
 
 本文只记录已经实际运行过的实验，以及当前已经确定但尚未运行的下一组实验。
 训练产物中的 `training_config`、逐 epoch 日志和评测指标优先级最高；README
@@ -43,6 +43,8 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是训练停止时的 c
 | OP-RL-F4 | Office Products | MiniOneRec-RL，mixed-task fixed reference，四卡 | final | 0.22236 | 0.16584 | 0.12580 |
 | OP-RL-H1 | Office Products | MiniOneRec-RL，history-only，四卡 | final | 0.22544 | 0.16482 | 0.12644 |
 | OP-RL-C1 | Office Products | MiniOneRec-RL，保守 mixed，四卡一轮 | final | 0.23469 | 0.17078 | 0.12934 |
+| OP-RL-PA | Office Products | 原奖励，保守 mixed，四卡 1,000 步 | final | 0.23448 | 未评测 | 未评测 |
+| OP-RL-PB | Office Products | 主任务全未命中前缀辅助，λ=0.1，四卡 1,000 步 | final | 0.23469 | 未评测 | 未评测 |
 
 ### 当前结论
 
@@ -57,7 +59,9 @@ checkpoint，RL 没有 best-checkpoint 选择，评测的是训练停止时的 c
   reward 标准差为零，sync 还出现过很大的 KL 尖峰。
 - 四卡 history-only RL 与四卡 mixed-task RL 基本持平，仍低于 SFT parent；去掉
   三类辅助任务没有消除负收益。保守 mixed 配置已完成，接近 SFT 但没有建立正向
-  收益；下一组固定这些条件，比较原奖励与主任务全未命中组的前缀辅助信号。
+  收益。固定这些条件的 1,000 步前缀辅助 A/B 已完成，仍未建立超过 SFT 或原奖励
+  的收益：B 相对 A 在 4,866 条验证样本中净增 1 个 Top10 命中，但少 6 个 Top5
+  命中。辅助信号实际启用，其优势绝对值总量约为原奖励项的 0.9%；详见第 12 节。
 
 ## 3. Video Games：MiniOneRec-SFT 学习率实验
 
@@ -428,16 +432,17 @@ bootstrap 区间跨零。本组未修改奖励，不能证明稀疏奖励是唯�
 
 ## 11. 证据完整性
 
-- 已保存的 Office Products 运行具有 `metrics.json`、`valid_metrics.json`
-  和训练指标文件，命令参数由其中的 `training_config` 交叉验证。
-- Video Games `1e-4` 完整结果可从 Git 历史中的 `outputs.zip` 读取；当前工作树
-  中该 zip 已被删除，本文没有恢复它。
+- 早期 Office Products 运行具有 `metrics.json`、`valid_metrics.json`
+  和训练指标文件；第 12 节 A/B 只评测 Valid，不填 Test 结果。命令参数由保存的
+  `training_config` 交叉验证。
+- Video Games `1e-4` 完整结果可从 Git 历史中的 `outputs.zip` 读取。本次用户提供
+  了新的 `outputs.zip`，其中两组前缀 A/B 的 8 个文件与工作树对应文件逐字节一致。
 - Video Games `5e-5` 与 `2e-4` 只保留了对话中的现象和最终比较结论，缺少完整
   metrics，因此本文不填写无法验证的最终数值。
 - 若用相同 run tag 在保留 checkpoint 的服务器上重新执行 SFT，runner 会拒绝
   覆盖；复跑时应给 `--run_tag` 增加新的后缀。
 
-## 12. 已实现、待训练：主推荐全未命中组的前缀辅助优势
+## 12. 已完成：主推荐全未命中组的前缀辅助优势 A/B
 
 用户授权修改实现、README 和实验历史。默认 `official` 不改变；显式选择
 `main_miss_prefix` 才启用以下规则：
@@ -459,6 +464,7 @@ else:
 1,000 个 optimizer updates 停止，保留一轮 scheduler 总步数，只评测 Valid。
 本轮采用固定停止步的 final checkpoint；尚未实现 250/500/1000 多 checkpoint
 的自动 Recall/NDCG 选优，避免把周期 RL eval_loss 当成排名指标。
+以下为已完成实验的复现命令；再次运行须使用新 run tag。
 
 ```bash
 for reward_mode in official main_miss_prefix; do
@@ -487,7 +493,7 @@ for reward_mode in official main_miss_prefix; do
 done
 ```
 
-新输出目录位于：
+已完成实验的输出目录位于：
 
 ```text
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/
@@ -500,8 +506,113 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_rl/
 exact+rank，新增 `prefix_aux/.../aux_active` 才表示辅助信号是否实际启用。
 训练 metadata 记录 reward mode、strength、stop_after_steps、完成步数和计划总步数。
 
-**状态：实现完成，68 项 CPU 检查和双进程 TRL 生命周期验证通过；两组文档命令
-dry-run 通过。生产 GPU 训练尚未开始，指标待填。**
-前轮离线验证 Top10 诊断的 23.59%→41.02% 只是奖励差异覆盖，不能当作训练
-覆盖率或 Recall 改善。成功判据是固定步数下 Valid NDCG@10/Recall@10 相对
-同预算原奖励和 SFT 的表现；只提高 prefix 命中不算成功，当前不使用 test 调参。
+**状态：两组均完成 1,000 次 optimizer update，λ=0.1 未建立推荐收益。**
+实现阶段的 68 项 CPU 检查、双进程 TRL 生命周期验证和文档命令 dry-run 已通过。
+2026-09-08 根据生产训练日志和保存的验证预测完成以下分析。
+
+### 12.1 可比性和验证结果
+
+两组 training_config 除 reward_mode 和三个输出路径外完全相同：同一 SFT parent
+路径、数据指纹、seed42、四任务、G16、四卡有效 batch256、LR2e-6、beta0.01。
+均完成 1,000/3,455 个计划更新，保留一轮 scheduler，约 0.2894 epoch；逐步任务组
+数量、累计 token 数和学习率一致。验证集同为 4,866 条、1,795 个用户，生成预算
+80→Top10。未取得生产权重哈希，因此不声称父模型权重逐位相同。
+
+| checkpoint | Valid R@10 | Valid NDCG@10 | Valid R@5 | Valid NDCG@5 | Top10 命中数 |
+|---|---:|---:|---:|---:|---:|
+| SFT parent | 0.235923 | 0.190004 | 0.210234 | 0.181799 | 1,148 |
+| A：原奖励 | 0.234484 | 0.189556 | 0.207974 | 0.181036 | 1,141 |
+| B：前缀辅助 λ=0.1 | 0.234690 | 0.189771 | 0.206741 | 0.180743 | 1,142 |
+
+B 相对 A 新增 12 个 Top10 命中、丢失 11 个，净增 1 个；Top5 净少 6 个。
+B 相对 SFT 新增 13 个、丢失 19 个，净少 6 个。A/B Top10 候选集合平均重合
+95.02%，主要推荐结果仍很接近。保守一轮 C1 恰好也有 1,142 个 Top10 命中，
+但它与 B 是不同实验，不能据此认为两个 checkpoint 相同。
+
+按用户配对 bootstrap 10,000 次，B−A 的 R@10 差为 +0.000206，95% 区间
+[-0.001706, +0.002097]；NDCG@10 差为 +0.000215，区间
+[-0.000514, +0.000957]。B−SFT 的两个区间也跨零。此次未建立正收益，亦不能
+据此断言所有前缀系数/训练预算都无效；上述区间只反映验证用户抽样不确定性，
+不包含训练种子间方差。
+
+### 12.2 信号已启用，但推荐指标没有相应提升
+
+- 两组各有 16,000 个训练 prompt 组。B 主推荐组 11,286 个，其中 exact 命中
+  4,578 个（40.56%），另有 1,946 个全未命中组收到非零前缀优势（17.24%）。
+  主任务有非零任务优势的组占比因此由 40.56% 增至 57.81%。其余三任务无辅助项。
+- 按四任务实际组数加权，B 原奖励有信号的组占 37.01%，加入辅助后为 49.17%。
+  这里统计的是任务优势，零任务优势组仍可能有 KL 梯度。原日志
+  `frac_reward_zero_std=62.99%` 不包含新增辅助项，不能用它判断该功能未生效。
+- 辅助项在激活组内平均 `|A_aux|=0.01304`；按当前 G16 exact+rank 公式计算，
+  命中组平均 `|A_official|` 约 0.465–0.468。全训练候选辅助优势绝对值总量约为
+  原奖励项的 0.917%–0.922%。这只衡量标量优势权重，不能解释成参数梯度占比。
+- A/B 训练 KL 均值 0.002438/0.002460，最大值 0.03978/0.03724，这 1,000 步
+  没有重现早期实验的大 KL 尖峰。两组各 999/1,000 步的裁剪前梯度范数大于 0.3；
+  该统计不是实际参数更新量，不能单独证明裁剪导致无收益。
+
+前轮离线 SFT Top10 的 23.59%→41.02% 是不同候选分布上的代理覆盖率，应与
+以上实际训练 G16 统计分开。本轮覆盖增加没有转化为推荐收益，不能继续把
+“奖励稀疏”当成已证实的唯一或首要原因。当前优先检验的假设是辅助信号强度
+偏弱；另一可能是粗粒度前缀相似不足以指导具体商品的排序，两者尚未区分。
+
+### 12.3 分析后的初始建议
+
+不直接延长 λ=0.1 到整轮。先用现有参数开关将 λ 调至 0.5，仍从同一 SFT 开始，
+固定 1,000 步、原 scheduler、seed42 和全部其他配置，只使用新 run tag；以
+已完成的 A/λ=0.1 为对照。该幅度让相同候选上的辅助优势扩大 5 倍，目的是检验
+强度假设，不保证收益；不同时修改 KL、学习率、任务范围或 SFT。
+
+以 Valid NDCG@10 为主指标，并看 Recall@10、Top5 和配对命中得失。只有真实
+推荐指标出现可信改善才扩预算；如果强度增大后只涨前缀指标，或仍无推荐收益，
+则停止单纯提高前缀系数，转向研究奖励是否能区分同前缀下的具体商品。
+目前没有启动新训练，也没有使用 test 调参。
+随后按用户要求，将单点强度试验组织为第 13 节的串行四组验证，仍只改变奖励强度。
+
+可复算脚本、原始文件 SHA256、详细证据和报告保存在本地忽略目录
+`analysis/prefix_ab_results_20260908/`；本节保留可提交的核心结论。
+
+## 13. 已实现、待训练：串行前缀强度验证
+
+2026-09-08 用户要求脚本串行跑 3–4 组。新增
+`scripts/run_prefix_sweep.py`，默认四组如下；已有 λ=0.1 与 SFT 指标作为历史参考，
+此次重新运行原奖励作为本批对照。以下组尚无生产训练结果。
+
+| 顺序 | reward_mode | λ | optimizer updates | 目的 |
+|---|---|---:|---:|---|
+| 1 | official | 不生效 | 1,000 | 本批原奖励对照 |
+| 2 | main_miss_prefix | 0.3 | 1,000 | 中等强度 |
+| 3 | main_miss_prefix | 0.5 | 1,000 | 主要强度假设 |
+| 4 | main_miss_prefix | 1.0 | 1,000 | 较强辅助的收益/退化边界 |
+
+四组均从同一现有 `seed_42_sft6e_lr1e-4_best/best_checkpoint` 独立初始化。
+固定 Office Products、Qwen3-0.6B、history50、seed42、四任务、G16、四卡
+micro16×GA4、有效 batch256、LR2e-6、beta0.01、fixed reference 和一轮 scheduler。
+只做 Valid 预算80→Top10。原奖励组记录 λ=0.1，但该模式不使用辅助项。
+
+```bash
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3
+```
+
+加 `--dry_run` 只打印命令；加 `--resume` 跳过校验通过的已完成组，并将失败/
+中断组放入新 attempt 目录，从父 SFT 重跑。只要三组则加 `--strengths 0.5 1.0`，
+恢复时保持相同列表。新实验使用新 sweep tag；不指定则自动生成时间戳。
+`--summarize_only` 仅重建汇总，不需要训练权重。
+
+执行中每组训练和最终验证结束后才启动下一组，失败即停止。新增通用 runner
+开关 `--require_existing_sft`，在父模型缺失或不兼容时明确退出；本脚本不启动
+SFT 训练。相同 sweep tag 有进程锁，旧输出不覆盖；恢复不等同于恢复未完成组的
+optimizer state，未完成组从 SFT 重新训练，之前 attempt 保留。
+
+汇总目录为
+`outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/prefix_sweeps/<sweep_tag>/`：
+
+- `state.json`：每组状态、命令、run tag 和尝试记录；逐组控制台输出另存 `.log`。
+- `summary.csv` / `summary.json`：Valid R/NDCG@5/10、SID 前缀命中、相对 SFT/
+  本批原奖励的 Top10 指标差，以及按任务组数加权的辅助覆盖、幅度和 KL。
+- 原训练日志、预测、metrics 和权重仍使用标准 `minionerec_rl` 目录；历史参考
+  只在配置匹配时纳入，缺失时注明，不用历史结果冒充新试验。
+
+这组实验检验强度，而非保证更大的 λ 更好。先看 Valid NDCG@10，再看 Recall@10、
+Top5 与配对得失；自动汇总不计算显著性或自动扩大预算。若增强后仍只有前缀
+指标改善，应停止单纯增大系数。35 项串行调度/runner 检查通过，已用第 12 节真实
+A/B 文件验证汇总数值；当前只完成脚本与本地验证，生产 GPU 训练待运行。

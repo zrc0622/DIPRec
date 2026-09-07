@@ -59,6 +59,7 @@ DIPREC_RL_NUM_ITERATIONS=2
 DIPREC_RL_BETA=0.001
 DIPREC_RL_EVAL_STEPS=0.1
 SKIP_PREPROCESS=0
+REQUIRE_EXISTING_SFT=0
 DRY_RUN=0
 
 usage() {
@@ -122,6 +123,7 @@ while [[ $# -gt 0 ]]; do
     --diprec_rl_beta) DIPREC_RL_BETA="$2"; shift 2 ;;
     --diprec_rl_eval_steps) DIPREC_RL_EVAL_STEPS="$2"; shift 2 ;;
     --skip_preprocess) SKIP_PREPROCESS=1; shift ;;
+    --require_existing_sft) REQUIRE_EXISTING_SFT=1; shift ;;
     --dry_run) DRY_RUN=1; shift ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -411,6 +413,10 @@ ensure_sft() {
   if checkpoint_ready "$destination" "$sft_method" "$source_model" "$expected_item_meta"; then
     echo "Using existing validated $sft_method checkpoint: $destination"
     return
+  fi
+  if [[ "$REQUIRE_EXISTING_SFT" -eq 1 ]]; then
+    echo "Required existing $sft_method checkpoint is missing or incompatible: $destination; SFT will not be trained" >&2
+    exit 1
   fi
   if [[ "$DRY_RUN" -eq 0 && ( -e "$destination" || -e "$final_destination" ) ]]; then
     echo "Incomplete, incompatible, or legacy $sft_method checkpoints under $(dirname "$destination"); choose a new --run_tag or relocate them before retraining" >&2

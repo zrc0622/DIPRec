@@ -261,10 +261,11 @@ CUDA_VISIBLE_DEVICES=1 bash scripts/run_experiment.sh --method diprec_sft --data
 
 ### 3. RL
 
-当前进行 **原奖励 vs 主任务全未命中组前缀辅助信号** 的短程 A/B 实验。
-保守版 mixed RL 已完成：Valid Recall@10=`0.23469`、NDCG@10=`0.18978`，
-接近但没有超过 SFT 的 `0.23592/0.19000`。本次固定现有 SFT、seed42、Qwen3、
-history50、四类任务、采样、优化器和 reference，仅比较奖励/优势处理。
+**原奖励 vs 主任务全未命中组前缀辅助信号** 的 1,000 步 A/B 已完成（2026-09-08）。
+Valid Recall@10/NDCG@10：原奖励 `0.234484/0.189556`，前缀 λ=0.1
+`0.234690/0.189771`，SFT `0.235923/0.190004`。前缀方案相对原奖励净增
+1 个 Top10 命中、少 6 个 Top5 命中，配对区间跨零，尚未建立推荐收益。
+两组固定现有 SFT、seed42、Qwen3、history50、四类任务、采样、优化器和 reference。
 
 - `official`（默认）：沿用 exact + rank 奖励和组内标准化。
 - `main_miss_prefix`：只有 `history_sid_to_sid` 的整组候选都没有正确 SID 时，
@@ -273,10 +274,12 @@ history50、四类任务、采样、优化器和 reference，仅比较奖励/优
   `λ × (h - 组内平均 h)`，首轮 `λ=0.1`。辅助项不再除以标准差，保证系数
   控制实际强度；全组前缀同分仍无辅助更新。KL 项保持原样。
 
-这是方法改进开关，尚无训练收益。保存的 SFT 验证 Top10 上，可区分组比例由
-23.59% 增至 41.02%；这只是离线代理诊断，不能当成训练 G16 覆盖率或 Recall 提升。
+实测辅助信号覆盖 17.24% 的主任务训练组，四任务有非零任务优势的组占比从
+37.01% 增至 49.17%，但辅助优势绝对值总量仅约为原奖励项的 0.9%（并非梯度占比）。
+两组 KL 均值约 0.0024，无早期大尖峰。信号已启用，强度和排序价值仍待验证。
+先前 SFT 验证 Top10 上的 23.59%→41.02% 只是离线代理覆盖率，与训练 G16 不同。
 
-以下命令顺序运行两个独立的 1,000-update 对照，均从同一个已有 SFT 初始化。
+以下保留已完成 A/B 的复现命令；复跑须换新 run tag。两组均从同一个已有 SFT 初始化。
 `stop_after_steps` 在 optimizer update 边界停止，不把一轮 cosine 的总步数压缩为
 1,000；取 `0` 或省略则跑完一轮。两组均评测停止时的 `final_checkpoint`，
 `--eval_split valid` 只做最终验证集推荐评测，暂不运行 test。
@@ -318,7 +321,7 @@ SFT parent：
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-两个新目录分别使用 `rl_prefix_ab_official_...` 和 `rl_prefix_ab_main_miss_prefix_...`
+两个已完成目录分别使用 `rl_prefix_ab_official_...` 和 `rl_prefix_ab_main_miss_prefix_...`
 run tag；训练配置会保存 reward mode、辅助强度、完成步数和 scheduler 总步数。
 默认仍是原奖励、LR1e-5、beta1e-3、2 epochs；命令显式指定保守配置。
 底层 `train_baseline_grpo.py` 对应参数为 `--reward_mode`、`--prefix_reward_strength`、
@@ -332,10 +335,39 @@ run tag；训练配置会保存 reward mode、辅助强度、完成步数和 sch
 原 `reward`、`frac_reward_zero_std` 仍只描述 exact+rank；不要用它们判断新增优势
 是否生效。默认每步记录；调大 `log_every` 后汇总指标是各记录批次统计值的平均。
 
-固定 1,000 步比较 Valid NDCG@10（主指标）、Recall@10 和相对 SFT 的命中新增/丢失。
-周期 `eval_loss` 和前缀分数不用于选择 best checkpoint。只有真实推荐指标改善，
-才考虑两组都换新 tag 扩至一轮；只涨前缀命中不算成功。实验记录见
-[EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
+已提供串行强度验证脚本（尚未在 GPU 上运行）：默认依次运行 **原奖励、λ=0.3、
+λ=0.5、λ=1.0** 四组，每组固定 1,000 步，从同一已有 SFT 独立初始化，固定其余
+配置。已有 λ=0.1 结果作为历史参考；此次重跑原奖励作为同批对照。
+
+```bash
+# 在 DIPRec 根目录、已激活训练环境后运行；需要四张 GPU 和现有 SFT checkpoint
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3
+
+# 仅预览四组命令，不写文件、不加载模型
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --dry_run
+
+# 中断/失败后：跳过已校验完成组，未完成组用新 attempt 目录从 SFT 重跑
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3 --resume
+
+# 只重建已有结果汇总
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --summarize_only
+```
+
+只跑三组时加 `--strengths 0.5 1.0`（原奖励始终保留），恢复时需传相同列表。
+不指定 `--sweep_tag` 会生成时间戳 tag；独立重跑用新 tag。脚本逐组等待训练和
+Valid 评测结束，失败立即停止，不覆盖旧实验。`--require_existing_sft` 强制
+通用 runner 在父 checkpoint 缺失/不兼容时退出，不触发 SFT 自动训练。
+
+总日志、`state.json`、`summary.csv` 和 `summary.json` 位于
+`outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/prefix_sweeps/<sweep_tag>/`。
+每组训练/预测产物仍在标准 `minionerec_rl/seed_42_rl_<sweep_tag>_...` 目录。
+汇总每组 Valid R/NDCG@5/10、前缀命中、相对 SFT/本批原奖励的 Top10 指标差，
+以及按组数加权的辅助覆盖、平均绝对优势和 KL。可用且配置匹配的旧 A/B 与 SFT
+标为 reference；缺失/不匹配会注明，不会当成新实验或导致缺失参考时重训。
+
+以 Valid NDCG@10 为主，并检查 Recall@10、Top5 和后续配对命中分析；自动汇总
+只展示点估计，不据微小差异自动选“最优”或扩预算。只涨前缀指标仍不算成功，
+不使用 test 调参。完整结果与边界见 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察

@@ -220,11 +220,13 @@ the fixed 80-candidate SID budget across the unique plans actually returned.
 
 ### 3. RL
 
-The next experiment compares **official rewards vs prefix assistance on all-miss
-recommendation groups**. The conservative mixed run is complete: Valid
-Recall@10=`0.23469`, NDCG@10=`0.18978`, close to but below the SFT parent's
-`0.23592/0.19000`. Keep the existing SFT, seed42, Qwen3, history50, all four tasks,
-sampling, optimizer, and reference fixed across both arms.
+The 1,000-update **official rewards vs prefix assistance on all-miss recommendation
+groups** A/B is complete (2026-09-08). Valid Recall@10/NDCG@10 are
+`0.234484/0.189556` for official rewards, `0.234690/0.189771` for prefix λ=0.1,
+and `0.235923/0.190004` for SFT. Prefix assistance gains one net Top10 hit but loses
+six Top5 hits versus official rewards; paired intervals cross zero. No recommendation
+gain is established. Both arms fix the existing SFT, seed42, Qwen3, history50, all
+four tasks, sampling, optimizer, and reference.
 
 - `official` (default): exact + rank rewards with the existing group normalization.
 - `main_miss_prefix`: add assistance only when a `history_sid_to_sid` group has
@@ -234,11 +236,16 @@ sampling, optimizer, and reference fixed across both arms.
   term by group std: its coefficient must control actual strength. Uniform
   prefix scores add no signal. The KL term is unchanged.
 
-This optional method change has no trained-model results yet. Saved SFT validation
-Top10 candidates show informative-group coverage increasing from 23.59% to 41.02%;
-that offline proxy is neither training G16 coverage nor a Recall improvement.
+The auxiliary signal activates in 17.24% of main-task training groups, raising
+nonzero task-advantage coverage across all four tasks from 37.01% to 49.17%.
+Its total absolute scalar advantage is only about 0.9% of the official term
+(this is not a gradient contribution estimate). Mean KL is about 0.0024 in both
+arms, without the earlier large spikes. Signal strength and ranking utility remain
+open questions. The earlier SFT Top10 coverage proxy, 23.59%→41.02%, uses different
+candidates from actual training G16 rollouts.
 
-Run two independent 1,000-update pilots from the same existing SFT. The stop callback
+The commands below reproduce the completed pilots; use fresh run tags for reruns.
+Both arms start from the same existing SFT. The stop callback
 preserves the full one-epoch cosine schedule; it does not shorten the scheduler to
 1,000 updates. Use `0` or omit the stop option for a full epoch. Both arms evaluate
 the checkpoint at the same stopping step, without selecting by RL eval_loss.
@@ -282,7 +289,7 @@ SFT parent:
 output_dir/Office_Products/history_50/Qwen_Qwen3-0.6B/minionerec_sft/seed_42_sft6e_lr1e-4_best/best_checkpoint
 ```
 
-The two new run tags start with `rl_prefix_ab_official_...` and
+The two completed run tags start with `rl_prefix_ab_official_...` and
 `rl_prefix_ab_main_miss_prefix_...`. Saved training metadata includes reward mode,
 strength, completed updates and scheduler total steps. Historical defaults remain
 official rewards, LR1e-5, beta1e-3, and two epochs; the command explicitly selects
@@ -300,11 +307,45 @@ prefix diagnostics too, with `aux_active=0`. Existing `reward` and
 `frac_reward_zero_std` still describe only exact+rank. Logging defaults to every
 step; with larger log intervals, aggregated diagnostics average batch statistics.
 
-Compare Valid NDCG@10 first, Recall@10 and hits gained/lost relative to SFT second,
-at the fixed 1,000-update endpoint. Prefix scores and periodic RL eval_loss do not
-select a best checkpoint. Expand both arms to one epoch with fresh tags only after
-actual recommendation metrics improve. Prefix-only gains do not establish success.
-See [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md) for the experiment ledger.
+A serial strength sweep is available (not yet run on GPUs). It runs **official,
+λ=0.3, λ=0.5, λ=1.0**, in that order, for 1,000 updates each from the same existing
+SFT, fixing all other settings. Previous λ=0.1 results remain historical references;
+official rewards are rerun as a control in this batch.
+
+```bash
+# From the DIPRec root with the training environment activated; needs four GPUs and existing SFT
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3
+
+# Print commands without writing files or loading models
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --dry_run
+
+# Skip verified complete arms; retry incomplete arms from SFT under fresh attempt tags
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3 --resume
+
+# Rebuild the summary only
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --summarize_only
+```
+
+For three arms, add `--strengths 0.5 1.0`; official rewards are always included.
+Pass the same strengths when resuming. Omitting `--sweep_tag` generates a timestamp;
+use a new tag for independent reruns. Each arm finishes training and Valid evaluation
+before the next starts. Failure stops the sweep, preserving previous outputs.
+The runner's `--require_existing_sft` flag rejects missing/incompatible parents
+instead of triggering SFT training.
+
+Console logs, `state.json`, `summary.csv`, and `summary.json` are saved under
+`outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/prefix_sweeps/<sweep_tag>/`.
+Individual results keep the standard `minionerec_rl/seed_42_rl_<sweep_tag>_...` paths.
+Summaries include Valid R/NDCG@5/10, prefix hits, Top10 metric deltas versus SFT and
+the new official control, count-weighted auxiliary coverage/magnitude and KL.
+Compatible previous A/B and SFT results are labeled reference; unavailable or
+incompatible references are reported and never silently substituted or retrained.
+
+Use Valid NDCG@10 first, then Recall@10, Top5 and subsequent paired-hit analysis.
+The summary contains point estimates only; it does not automatically select a winner
+or extend training based on tiny differences. Prefix-only gains do not establish
+success. Do not use test results for tuning. See
+[EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md) for the experiment ledger.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These
