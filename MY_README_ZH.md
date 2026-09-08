@@ -335,13 +335,21 @@ run tag；训练配置会保存 reward mode、辅助强度、完成步数和 sch
 原 `reward`、`frac_reward_zero_std` 仍只描述 exact+rank；不要用它们判断新增优势
 是否生效。默认每步记录；调大 `log_every` 后汇总指标是各记录批次统计值的平均。
 
-已提供串行强度验证脚本（尚未在 GPU 上运行）：默认依次运行 **原奖励、λ=0.3、
-λ=0.5、λ=1.0** 四组，每组固定 1,000 步，从同一已有 SFT 独立初始化，固定其余
-配置。已有 λ=0.1 结果作为历史参考；此次重跑原奖励作为同批对照。
+串行强度验证已完成：**原奖励、λ=0.3、λ=0.5、λ=1.0** 四组各1,000步，
+使用同一已有SFT和其他训练配置。Valid R@10/NDCG@10分别为
+`0.234484/0.189556`、`0.234073/0.189279`、`0.234279/0.189619`、
+`0.234895/0.190032`。λ=1.0比SFT的NDCG@10仅高0.000027，Top10/Top5命中
+分别少5/13条，配对区间跨零，未建立可信收益。重跑原奖励的训练记录和验证
+预测与旧原奖励一致；λ=0.1保留为历史参考。
+
+λ=1.0的辅助优势确实约为0.1时的10倍，KL仍稳定，但未看到推荐覆盖随强度
+改善。停止单纯扫描系数；下一轮按下方五组方案检查 reference、KL 系数和学习率，
+使用原 exact+rank 奖励，不做向量相似度实验。
+以下保留脚本用法；已完成的`prefix_strength_v1`仅用于恢复/汇总，新训练换tag。
 
 ```bash
-# 在 DIPRec 根目录、已激活训练环境后运行；需要四张 GPU 和现有 SFT checkpoint
-python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3
+# 如需独立复跑：在 DIPRec 根目录激活训练环境，需要四张 GPU 和现有 SFT checkpoint
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_rerun --gpus 0,1,2,3
 
 # 仅预览四组命令，不写文件、不加载模型
 python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --dry_run
@@ -369,6 +377,59 @@ Valid 评测结束，失败立即停止，不覆盖旧实验。`--require_existi
 只展示点估计，不据微小差异自动选“最优”或扩预算。只涨前缀指标仍不算成功，
 不使用 test 调参。完整结果与边界见 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
 
+### 4. 五组 RL 优化实验（已实现，待运行）
+
+在 DIPRec 根目录激活训练环境，使用四张 GPU 和已有
+`sft6e_lr1e-4_best/best_checkpoint`。五组各自从同一 SFT 开始，串行执行：
+
+| 组 | Reference | β | 学习率 | 主要比较 |
+|---|---|---:|---:|---|
+| A | fixed | 0.01 | 2e-6 | 整轮对照 |
+| B | sync | 0.01 | 2e-6 | B−A：同步 reference |
+| C | fixed | 0.001 | 2e-6 | C−A：减弱 KL |
+| D | sync | 0.001 | 2e-6 | D−C / D−B：同步与 KL 的组合 |
+| E | fixed | 0.01 | 5e-6 | E−A：增大学习率 |
+
+统一使用 Office Products、Qwen3-0.6B、history50、seed42、四类任务、原
+exact+rank 奖励、G16、四卡 micro16×累积4（全局 batch256）。没有前缀辅助或
+向量相似度奖励。sync 每512次更新执行 `ref = 0.4 * ref + 0.6 * policy`。
+每组训练1 epoch，当前数据应为3,455步；开始更新前检查实际总步数，配置变化会报错。
+
+```bash
+# 预览五组与评测命令，不写文件或加载模型
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --dry_run
+
+# 串行运行五组；自动先评测同一个初始 SFT 并构建固定探针
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --gpus 0,1,2,3
+
+# 中断后继续：已完成训练仅补评测，未完成训练换 attempt 从 SFT 重跑
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --gpus 0,1,2,3 --resume
+
+# 只汇总已有轻量产物，不加载模型；下载相关 outputs 后也可本地执行
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --summarize_only
+```
+
+每组在1,000/2,000步保存模型快照，整轮结束后离线评测这两个快照和3,455步终态。
+三次均用 Valid 全量、确定性80候选→最多Top10。原训练中 `eval_steps=0.1` 的
+RL validation 保留；新增完整排名评测不会插入训练。3,455步为主要比较终点，
+同时看相同步数的学习曲线，不为各组单独挑最高点。模型快照只含模型和tokenizer，
+不能恢复优化器或sync reference；每组比原流程多保存两份模型权重。
+
+固定探针默认抽128条train和128条valid主任务样本。初始SFT用相同推荐prompt和
+80候选beam选出5个不同的错误商品，再加真实目标；后续一直使用这6个候选。
+记录全词表下 SID+EOS 的target logp/概率、目标与最高分错误候选的margin、
+固定候选排名，以及相对初始SFT的分数变化。`candidate_set_kl_sft_to_policy`
+是这6个候选归一化后的KL，**不是全策略KL**；与训练日志中对fixed/sync reference
+计算的KL分开解读。可用 `--probe_samples` 调整样本数，续跑/汇总必须保持一致。
+
+总目录为 `outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/rl_optimization_sweeps/rl_opt_v1/`，
+包含state、probe清单、SFT基线和summary.csv/json。各组产物仍在
+`minionerec_rl/seed_42_rl_rl_opt_v1_<A-E>_a<N>/`：终态指标位于根目录，
+阶段指标位于`step_1000/`和`step_2000/`，各自保存valid预测和probe明细。
+汇总包含15个阶段结果、相对SFT及组间差值、三个训练区间的各任务命中组率与KL。
+只汇总点估计，不自动选择赢家，不使用test调参。已有SFT缺失/不兼容会退出；
+输入与权重哈希、完成标记校验后才允许复用，失败立即停止并保留日志。
+
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察
 validation loss；完整的 Recall/NDCG 仍在训练结束后计算。当前仍保存和最终评测训练结束时的 `final_checkpoint`，
@@ -382,8 +443,8 @@ validation loss；完整的 Recall/NDCG 仍在训练结束后计算。当前仍�
 outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL方法>/<run_id>/rl_training_metrics.json
 ```
 
-该文件可在训练尚未结束时直接下载查看；大 checkpoint 仍只保存在
-`output_dir/.../final_checkpoint`。
+该文件可在训练尚未结束时直接下载查看；大 checkpoint 保存在
+`output_dir/.../final_checkpoint`；五组优化脚本另保存同级`step_1000/step_2000`。
 
 若旧版本已经生成了包含全部训练事件的文件，可一次性清理整个输出目录：
 

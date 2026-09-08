@@ -51,6 +51,8 @@ BASELINE_RL_REWARD_MODE="official"
 BASELINE_RL_PREFIX_REWARD_STRENGTH=0.1
 BASELINE_RL_STOP_AFTER_STEPS=0
 BASELINE_RL_DIAGNOSTICS=0
+BASELINE_RL_SNAPSHOT_STEPS=""
+BASELINE_RL_EXPECTED_OPTIMIZER_STEPS=0
 EVAL_SPLIT="both"
 DIPREC_RL_PER_DEVICE_BATCH_SIZE=1
 DIPREC_RL_GENERATION_BATCH_SIZE=""
@@ -115,6 +117,8 @@ while [[ $# -gt 0 ]]; do
     --baseline_rl_prefix_reward_strength) BASELINE_RL_PREFIX_REWARD_STRENGTH="$2"; shift 2 ;;
     --baseline_rl_stop_after_steps) BASELINE_RL_STOP_AFTER_STEPS="$2"; shift 2 ;;
     --baseline_rl_diagnostics) BASELINE_RL_DIAGNOSTICS=1; shift ;;
+    --baseline_rl_snapshot_steps) BASELINE_RL_SNAPSHOT_STEPS="$2"; shift 2 ;;
+    --baseline_rl_expected_optimizer_steps) BASELINE_RL_EXPECTED_OPTIMIZER_STEPS="$2"; shift 2 ;;
     --eval_split) EVAL_SPLIT="$2"; shift 2 ;;
     --diprec_rl_per_device_batch_size|--diprec_rl_train_batch_size) DIPREC_RL_PER_DEVICE_BATCH_SIZE="$2"; shift 2 ;;
     --diprec_rl_generation_batch_size) DIPREC_RL_GENERATION_BATCH_SIZE="$2"; shift 2 ;;
@@ -234,6 +238,10 @@ for value in "$BASELINE_RL_LEARNING_RATE" "$BASELINE_RL_BETA"; do
 done
 if [[ -n "$BASELINE_RL_GENERATION_BATCH_SIZE" && ! "$BASELINE_RL_GENERATION_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "Baseline RL generation batch size must be a positive integer" >&2
+  exit 2
+fi
+if [[ -n "$BASELINE_RL_SNAPSHOT_STEPS" && ! "$BASELINE_RL_SNAPSHOT_STEPS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
+  echo "--baseline_rl_snapshot_steps requires comma-separated positive steps, e.g. 1000,2000" >&2
   exit 2
 fi
 if [[ -n "$DIPREC_RL_GENERATION_BATCH_SIZE" && ! "$DIPREC_RL_GENERATION_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
@@ -448,6 +456,7 @@ run_baseline_rl() {
     --reward_mode "$BASELINE_RL_REWARD_MODE"
     --prefix_reward_strength "$BASELINE_RL_PREFIX_REWARD_STRENGTH"
     --stop_after_steps "$BASELINE_RL_STOP_AFTER_STEPS"
+    --expected_optimizer_steps "$BASELINE_RL_EXPECTED_OPTIMIZER_STEPS"
     --eval_steps "$BASELINE_RL_EVAL_STEPS"
     --max_history_len "$MAX_HISTORY_LEN"
     --max_seq_len "$MAX_SEQ_LEN"
@@ -457,6 +466,11 @@ run_baseline_rl() {
   fi
   if [[ "$BASELINE_RL_DIAGNOSTICS" -eq 1 ]]; then
     cmd+=(--diagnostics_file "$RUN_DIR/rl_diagnostics.jsonl")
+  fi
+  if [[ -n "$BASELINE_RL_SNAPSHOT_STEPS" ]]; then
+    local snapshot_steps=()
+    IFS=',' read -r -a snapshot_steps <<< "$BASELINE_RL_SNAPSHOT_STEPS"
+    cmd+=(--snapshot_steps "${snapshot_steps[@]}")
   fi
   if [[ "$rl_method" == "minionerec_rl" ]]; then
     cmd+=(--item_meta "$ITEM_META")

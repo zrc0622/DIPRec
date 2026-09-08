@@ -307,14 +307,23 @@ prefix diagnostics too, with `aux_active=0`. Existing `reward` and
 `frac_reward_zero_std` still describe only exact+rank. Logging defaults to every
 step; with larger log intervals, aggregated diagnostics average batch statistics.
 
-A serial strength sweep is available (not yet run on GPUs). It runs **official,
-λ=0.3, λ=0.5, λ=1.0**, in that order, for 1,000 updates each from the same existing
-SFT, fixing all other settings. Previous λ=0.1 results remain historical references;
-official rewards are rerun as a control in this batch.
+The serial sweep is complete: **official, λ=0.3, λ=0.5, λ=1.0**, each trained for
+1,000 updates from the same SFT with all other settings fixed. Valid R@10/NDCG@10
+are `0.234484/0.189556`, `0.234073/0.189279`, `0.234279/0.189619`, and
+`0.234895/0.190032`. At λ=1.0, NDCG@10 exceeds SFT by only 0.000027, while Top10
+and Top5 lose five and thirteen hits. Paired intervals cross zero: no reliable gain
+is established. The rerun official training records and validation predictions match
+the previous official run exactly; λ=0.1 remains a historical reference.
+
+The auxiliary advantage at λ=1.0 is about ten times its λ=0.1 value, with stable KL,
+but recommendation coverage does not clearly improve. Stop scanning prefix strength;
+the next five-arm sweep below tests reference mode, KL strength and learning rate
+with official exact+rank rewards and no vector-similarity experiments. Commands below remain available for
+reproduction; use a new tag for new training, and the completed tag for summaries.
 
 ```bash
-# From the DIPRec root with the training environment activated; needs four GPUs and existing SFT
-python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --gpus 0,1,2,3
+# Optional independent rerun from DIPRec root; needs training environment, four GPUs and existing SFT
+python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_rerun --gpus 0,1,2,3
 
 # Print commands without writing files or loading models
 python3 scripts/run_prefix_sweep.py --sweep_tag prefix_strength_v1 --dry_run
@@ -347,6 +356,61 @@ or extend training based on tiny differences. Prefix-only gains do not establish
 success. Do not use test results for tuning. See
 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md) for the experiment ledger.
 
+### 4. Five RL optimization runs (implemented, not yet run)
+
+Use the existing `sft6e_lr1e-4_best/best_checkpoint`, four GPUs, and the activated
+training environment from the DIPRec root. Every arm starts independently from SFT.
+
+| Arm | Reference | Beta | Learning rate | Comparison |
+|---|---|---:|---:|---|
+| A | fixed | .01 | 2e-6 | Full-epoch control |
+| B | sync | .01 | 2e-6 | B−A: reference sync |
+| C | fixed | .001 | 2e-6 | C−A: weaker KL |
+| D | sync | .001 | 2e-6 | D−C / D−B: sync and KL |
+| E | fixed | .01 | 5e-6 | E−A: higher LR |
+
+All use Office Products, Qwen3-0.6B, history50, seed42, four tasks, official
+exact+rank rewards, G16, four GPUs with micro16 × accumulation4 (global batch256).
+No prefix shaping or vector similarity is used. Sync runs update the reference every
+512 optimizer steps with `ref = .4 * ref + .6 * policy`. Each run is one epoch;
+the expected 3,455 optimizer steps are checked before the first update.
+
+```bash
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --dry_run
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --gpus 0,1,2,3
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --gpus 0,1,2,3 --resume
+python3 scripts/run_rl_optimization_sweep.py --sweep_tag rl_opt_v1 --summarize_only
+```
+
+The runner evaluates the initial SFT afresh, then serially trains and evaluates A–E.
+Model snapshots at 1,000/2,000 and the final 3,455 checkpoint receive full Valid
+80-candidate deterministic beam evaluation after training finishes. The existing
+in-training RL validation cadence remains unchanged. The primary endpoint is 3,455;
+compare intermediate checkpoints at matching steps, without per-arm cherry-picking.
+Snapshots store model/tokenizer only, adding two model copies per arm; they cannot
+resume the optimizer or synchronized reference.
+
+Frozen probes use 128 train and 128 valid main-task records by default. Each keeps the
+initial SFT's five highest-ranked distinct wrong items (beam80) plus the target,
+using the recommendation prompt. Measurements include full-vocabulary SID+EOS logp,
+target probability, target-minus-best-negative margin, fixed-candidate rank and
+drift from SFT. `candidate_set_kl_sft_to_policy` normalizes only these six candidates:
+it is **not full-policy KL**, nor the training KL against a moving sync reference.
+Change sample count with `--probe_samples`; use the same value on resume/summary.
+
+Sweep state, frozen probe, baseline and summaries live under
+`outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/rl_optimization_sweeps/<tag>/`.
+Individual runs use `minionerec_rl/seed_42_rl_<tag>_<A-E>_a<N>/`, with final metrics at
+the root and milestone metrics/predictions/probes in `step_1000/step_2000`.
+Summaries include 15 arm/stage rows, deltas versus SFT, five matched arm comparisons,
+and per-task exact-hit group fractions and KL across three training windows.
+They contain point estimates, not significance tests; test data is not evaluated.
+
+A failed evaluation resumes without retraining completed checkpoints. Interrupted
+training restarts from SFT in a fresh attempt directory. Missing/incompatible SFT
+never triggers SFT training. Input/weight hashes and completion markers guard reuse.
+`--summarize_only` needs the relevant lightweight outputs, not model weights.
+
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These
 measurements expose validation-loss trends; full Recall/NDCG evaluation still
@@ -363,7 +427,7 @@ outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/<RL-method>/<run_id>/rl_train
 ```
 
 This file is safe to download while training is still running. Large checkpoints
-remain only under `output_dir/.../final_checkpoint`.
+remain under `output_dir/.../final_checkpoint`; the optimization sweep also saves sibling `step_1000/step_2000` snapshots.
 
 To trim files produced by the older all-events logger, clean the whole output
 tree with:

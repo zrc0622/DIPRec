@@ -8,6 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RunnerContractTest(unittest.TestCase):
+    def test_baseline_snapshots_are_forwarded_without_stopping(self):
+        result = subprocess.run(['bash','scripts/run_experiment.sh','--method','minionerec_rl',
+            '--dataset','Office','--baseline_rl_snapshot_steps','1000,2000',
+            '--baseline_rl_expected_optimizer_steps','3455','--eval_split','valid','--dry_run'],
+            cwd=ROOT,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--snapshot_steps 1000 2000',result.stdout)
+        self.assertIn('--stop_after_steps 0',result.stdout)
+        self.assertIn('--expected_optimizer_steps 3455',result.stdout)
+
     def test_prefix_pilot_controls_and_validation_only_evaluation(self):
         result = subprocess.run([
             'bash', 'scripts/run_experiment.sh', '--method', 'minionerec_rl',

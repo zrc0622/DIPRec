@@ -6,7 +6,9 @@
 
 > **MiniOneRec RL 奖励实验：** `main_miss_prefix` 的 1,000 步 A/B 已完成，λ=0.1 的辅助信号已启用，但尚未建立推荐收益；默认仍使用原奖励。复现命令见 [中文指南](MY_README_ZH.md#3-rl)，结果与下一步建议见 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
 
-> **串行验证：** [run_prefix_sweep.py](scripts/run_prefix_sweep.py) 默认依次跑原奖励和 λ=0.3/0.5/1.0 四组，每组 1,000 步，自动保存日志和验证指标汇总，支持失败后继续。启动命令见 [中文指南](MY_README_ZH.md#3-rl)。
+> **串行验证已完成：** 原奖励和 λ=0.3/0.5/1.0 四组均完成 1,000 步，增强前缀信号仍未建立可信推荐收益，当前停止单纯扫描系数。[run_prefix_sweep.py](scripts/run_prefix_sweep.py) 保留串行运行与汇总功能；结果和后续方向见 [实验历史](EXPERIMENT_HISTORY.md#13-已完成串行前缀强度验证)。
+
+> **五组 RL 优化脚本已实现（待运行）：** [run_rl_optimization_sweep.py](scripts/run_rl_optimization_sweep.py) 串行比较 fixed/sync、β=.01/.001 和 LR2e-6/5e-6，统一原 exact+rank 奖励，无向量相似度。每组一轮，评测1,000/2,000/3,455步并生成固定train/valid诊断；支持评测续跑。命令见 [中文指南](MY_README_ZH.md#4-五组-rl-优化实验已实现待运行)。
 
 This is the code implementation for **"SIDReasoner - Reasoning over Semantic IDs Enhances Generative Recommendation"**.
 

@@ -30,7 +30,7 @@ from .prompts import (
     title_to_sid_prompt,
 )
 from .runtime import load_model_runtime, require_replicated_generation_backend, set_seed
-from .rl_logging import PersistentRLTrainingMetricsCallback, RLDiagnosticsCallback, StopAfterStepsCallback
+from .rl_logging import MilestoneSnapshotCallback, PersistentRLTrainingMetricsCallback, RLDiagnosticsCallback, StopAfterStepsCallback
 from .prefix_reward import REWARD_MODES, RL_TASKS, prefix_group_signal, validate_prefix_reward
 from .sft import catalog_alignment_maps
 
@@ -545,6 +545,13 @@ def train(args: argparse.Namespace) -> None:
     validate_prefix_reward(args.reward_mode, args.prefix_reward_strength)
     if args.stop_after_steps < 0:
         raise ValueError("--stop_after_steps must be non-negative")
+    if args.expected_optimizer_steps < 0:
+        raise ValueError("--expected_optimizer_steps must be non-negative")
+    snapshot_steps = getattr(args, "snapshot_steps", [])
+    if snapshot_steps != sorted(set(snapshot_steps)) or any(step <= 0 for step in snapshot_steps):
+        raise ValueError("--snapshot_steps must be sorted unique positive steps")
+    if args.stop_after_steps and any(step >= args.stop_after_steps for step in snapshot_steps):
+        raise ValueError("Snapshot steps must precede stop_after_steps")
     set_seed(args.seed)
     method = canonical_rl_method(args.method)
     train_path = Path(args.train_file)
@@ -748,12 +755,8 @@ def train(args: argparse.Namespace) -> None:
         trainer.add_callback(RLDiagnosticsCallback(args.diagnostics_file))
     if args.stop_after_steps:
         trainer.add_callback(StopAfterStepsCallback(args.stop_after_steps))
-    trainer.train()
-    trainer.accelerator.wait_for_everyone()
-    if trainer.accelerator.is_main_process:
-        trainer.save_model(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-        config = vars(args) | {
+    def training_metadata(completed_steps: int, total_steps: int) -> dict[str, Any]:
+        return vars(args) | {
             "method": method,
             "trainer": "trl.GRPOTrainer@0.24.0 + rank-local catalog beam-sampling override",
             "task_counts": task_counts,
@@ -768,10 +771,18 @@ def train(args: argparse.Namespace) -> None:
             "batch": batch_contract,
             "reference_policy": reference_policy,
             "prefix_advantage_normalization": "center_only_after_official_advantage",
-            "completed_optimizer_steps": trainer.state.global_step,
-            "scheduler_total_steps": trainer.state.max_steps,
+            "completed_optimizer_steps": completed_steps,
+            "scheduler_total_steps": total_steps,
             "use_vllm": False,
         }
+    if snapshot_steps or args.expected_optimizer_steps:
+        trainer.add_callback(MilestoneSnapshotCallback(trainer, snapshot_steps, training_metadata, args.expected_optimizer_steps))
+    trainer.train()
+    trainer.accelerator.wait_for_everyone()
+    trainer.save_model(args.output_dir)
+    if trainer.accelerator.is_main_process:
+        tokenizer.save_pretrained(args.output_dir)
+        config = training_metadata(trainer.state.global_step, trainer.state.max_steps)
         Path(args.output_dir, "training_config.json").write_text(
             json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
@@ -800,6 +811,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diagnostics_file", help="Optional append-only train/eval diagnostics JSONL")
     parser.add_argument("--stop_after_steps", type=int, default=0,
                         help="Stop after this many optimizer updates; 0 runs all epochs. LR schedule is unchanged.")
+    parser.add_argument("--snapshot_steps", type=int, nargs="*", default=[],
+                        help="Save model-only step_N snapshots for offline evaluation, without stopping training")
+    parser.add_argument("--expected_optimizer_steps", type=int, default=0,
+                        help="Optional fail-fast check of the derived schedule length; 0 disables it")
     parser.add_argument(
         "--task_scope",
         choices=BASELINE_RL_TASK_SCOPES,
