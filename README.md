@@ -8,7 +8,9 @@
 
 > **串行验证已完成：** 原奖励和 λ=0.3/0.5/1.0 四组均完成 1,000 步，增强前缀信号仍未建立可信推荐收益，当前停止单纯扫描系数。[run_prefix_sweep.py](scripts/run_prefix_sweep.py) 保留串行运行与汇总功能；结果和后续方向见 [实验历史](EXPERIMENT_HISTORY.md#13-已完成串行前缀强度验证)。
 
-> **五组 RL 优化脚本已实现（待运行）：** [run_rl_optimization_sweep.py](scripts/run_rl_optimization_sweep.py) 串行比较 fixed/sync、β=.01/.001 和 LR2e-6/5e-6，统一原 exact+rank 奖励，无向量相似度。每组一轮，评测1,000/2,000/3,455步并生成固定train/valid诊断；支持评测续跑。命令见 [中文指南](MY_README_ZH.md#4-五组-rl-优化实验已实现待运行)。
+> **五组 RL 优化已有部分结果（2026-09-09）：** A fixed、B sync 均完成3,455步，未提高Valid排名；固定train/valid探针的目标相对错误候选margin均下降。C在约第60步因磁盘不足中断，D/E未开始，降低β和提高LR尚无结论。释放训练机器磁盘后用 `--resume` 复用A/B、重跑C并执行D/E。配置与命令见 [中文指南](MY_README_ZH.md#4-五组-rl-优化实验部分完成)，结果见 [实验历史](EXPERIMENT_HISTORY.md#141-2026-09-09-上传结果ab完成c磁盘不足中断)。
+
+> **额外 F 组（已实现，待运行）：** [run_rl_extra_experiment.py](scripts/run_rl_extra_experiment.py) 使用4–7卡与独立端口，关闭KL惩罚（β=0），其余沿用A；复用同一SFT与冻结探针，独立保存状态和三个阶段结果，可与0–3卡的C/D/E并行。启动前先解决已有磁盘不足问题，命令见[中文指南](MY_README_ZH.md#额外f组使用4567卡)。
 
 This is the code implementation for **"SIDReasoner - Reasoning over Semantic IDs Enhances Generative Recommendation"**.
 

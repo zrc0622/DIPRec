@@ -356,7 +356,18 @@ or extend training based on tiny differences. Prefix-only gains do not establish
 success. Do not use test results for tuning. See
 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md) for the experiment ledger.
 
-### 4. Five RL optimization runs (implemented, not yet run)
+### 4. Five RL optimization runs (partially completed)
+
+September 9 upload: A/B completed all 3,455 updates and three evaluations without
+a Valid ranking gain. Final Recall@10 is SFT .235923, A .234073, B .232840;
+NDCG@10 is .190004, .189760, .189376. Sync takes effect, but target-minus-negative
+margins decrease on both frozen train and valid probes. C fails near step 60 with
+`No space left on device` (59 complete diagnostic rows); its saved `training`
+state is stale. D/E have not started, so lower beta and higher LR remain untested.
+Free space on the training filesystem before `--resume`. Retain SFT and A/B's
+final and milestone weights and evaluation files, which resume validates.
+The runner reuses A/B, restarts C from SFT in a fresh attempt, then runs D/E.
+See [experiment history](EXPERIMENT_HISTORY.md#141-2026-09-09-上传结果ab完成c磁盘不足中断).
 
 Use the existing `sft6e_lr1e-4_best/best_checkpoint`, four GPUs, and the activated
 training environment from the DIPRec root. Every arm starts independently from SFT.
@@ -402,7 +413,7 @@ Sweep state, frozen probe, baseline and summaries live under
 `outputs/Office_Products/history_50/Qwen_Qwen3-0.6B/rl_optimization_sweeps/<tag>/`.
 Individual runs use `minionerec_rl/seed_42_rl_<tag>_<A-E>_a<N>/`, with final metrics at
 the root and milestone metrics/predictions/probes in `step_1000/step_2000`.
-Summaries include 15 arm/stage rows, deltas versus SFT, five matched arm comparisons,
+When complete, summaries include 15 arm/stage rows (currently six), deltas versus SFT, five matched arm comparisons,
 and per-task exact-hit group fractions and KL across three training windows.
 They contain point estimates, not significance tests; test data is not evaluated.
 
@@ -410,6 +421,31 @@ A failed evaluation resumes without retraining completed checkpoints. Interrupte
 training restarts from SFT in a fresh attempt directory. Missing/incompatible SFT
 never triggers SFT training. Input/weight hashes and completion markers guard reuse.
 `--summarize_only` needs the relevant lightweight outputs, not model weights.
+
+#### Extra F arm on GPUs 4–7
+
+F removes the KL penalty (beta=0), keeping A's LR2e-6, official exact+rank rewards,
+four tasks, batch256 and 3,455 updates. Compare against A (.01) and C (.001).
+It is implemented but has not been trained in this workspace. Resolve the existing
+training-filesystem disk-full error before launching in a separate terminal:
+
+```bash
+python3 scripts/run_rl_extra_experiment.py --gpus 4,5,6,7
+```
+
+This reuses the `rl_opt_v1` SFT identity, baseline and exact frozen probe, with
+independent state under `rl_optimization_sweeps/rl_opt_extra_v1/` and run ID
+`seed_42_rl_rl_opt_extra_v1_F_a1`. It never updates A–E's state. Training uses
+port29517 (`--main_process_port` overrides); evaluation/probes use physical GPU4.
+It validates input hashes and skips shared preprocessing. Both jobs still share disk.
+
+Append `--dry_run`, `--resume`, or `--summarize_only` as needed. Interrupted training
+uses a fresh attempt from SFT; completed training resumes evaluation only. All three
+milestones receive ranking and frozen-probe evaluations. F−SFT is in `summary.csv/json`;
+`comparisons_with_source.json` contains F−A/F−C when the source evaluations are complete.
+Run summary again after C finishes to add its comparisons. Missing training KL at
+beta0 is reported as null/uncomputed, never zero drift. Frozen-candidate KL against
+initial SFT is still measured. SFT and reward formulas remain unchanged.
 
 All RL methods default to `eval_steps=0.1`, running RL validation at roughly
 every 10% of total training steps (about ten times over the full run). These

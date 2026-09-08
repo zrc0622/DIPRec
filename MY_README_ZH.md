@@ -377,7 +377,16 @@ Valid 评测结束，失败立即停止，不覆盖旧实验。`--require_existi
 只展示点估计，不据微小差异自动选“最优”或扩预算。只涨前缀指标仍不算成功，
 不使用 test 调参。完整结果与边界见 [EXPERIMENT_HISTORY.md](EXPERIMENT_HISTORY.md)。
 
-### 4. 五组 RL 优化实验（已实现，待运行）
+### 4. 五组 RL 优化实验（部分完成）
+
+2026-09-09上传：A/B完成整轮及三个阶段评测，均未提高Valid排名。最终
+Recall@10为SFT .235923、A .234073、B .232840；NDCG@10为.190004、
+.189760、.189376。sync生效，但固定train/valid探针margin均下降，尚无收益。
+C约第60步出现`No space left on device`，仅59条完整诊断记录；state中的
+`training`已不能代表正常运行。D/E未开始，因此低β和高LR尚无结论。
+先释放训练机器磁盘空间，再用下方`--resume`；保留初始SFT及A/B已完成的
+final、step_1000、step_2000权重与评测文件，续跑仍会校验它们。脚本复用A/B，
+C换新attempt从SFT重跑，随后执行D/E。详细分析见[实验历史](EXPERIMENT_HISTORY.md#141-2026-09-09-上传结果ab完成c磁盘不足中断)。
 
 在 DIPRec 根目录激活训练环境，使用四张 GPU 和已有
 `sft6e_lr1e-4_best/best_checkpoint`。五组各自从同一 SFT 开始，串行执行：
@@ -426,9 +435,36 @@ RL validation 保留；新增完整排名评测不会插入训练。3,455步为�
 包含state、probe清单、SFT基线和summary.csv/json。各组产物仍在
 `minionerec_rl/seed_42_rl_rl_opt_v1_<A-E>_a<N>/`：终态指标位于根目录，
 阶段指标位于`step_1000/`和`step_2000/`，各自保存valid预测和probe明细。
-汇总包含15个阶段结果、相对SFT及组间差值、三个训练区间的各任务命中组率与KL。
+五组全部完成后汇总包含15个阶段结果（当前6个）、相对SFT及组间差值、三个训练区间的各任务命中组率与KL。
 只汇总点估计，不自动选择赢家，不使用test调参。已有SFT缺失/不兼容会退出；
 输入与权重哈希、完成标记校验后才允许复用，失败立即停止并保留日志。
+
+#### 额外F组：使用4、5、6、7卡
+
+F关闭KL惩罚（β=0），LR2e-6，其余保持A的原exact+rank奖励、四任务、G16、
+batch256和3,455步预算。与A（β=.01）、C（β=.001）比较，检查KL约束是否
+限制目标区分与排名改善。该设置是诊断实验，尚无训练结果。
+
+先解决训练机器的磁盘不足，再在另一个终端运行：
+
+```bash
+python3 scripts/run_rl_extra_experiment.py --gpus 4,5,6,7
+```
+
+默认读取`rl_opt_v1`的SFT身份哈希、原冻结探针和SFT基线；独立目录为
+`rl_optimization_sweeps/rl_opt_extra_v1/`，模型/评测run tag为
+`seed_42_rl_rl_opt_extra_v1_F_a1`。不改原A–E状态，只有F会启动；训练使用
+独立端口29517（可用`--main_process_port`覆盖），评测与探针使用4号物理卡。
+保留原SFT、输入数据及原sweep轻量文件；F会复制基线/探针并校验输入一致性，
+不重新抽样或构建共享数据。GPU隔离不隔离磁盘，两路运行需要足够空间。
+
+可选`--dry_run`预览、`--resume`续跑、`--summarize_only`汇总，均加在上述
+同一命令后。训练中断用新attempt从SFT重跑，已完成训练仅补评测。
+三个阶段都有Valid排名和相同探针；`summary.csv/json`记录F与SFT差值，
+`comparisons_with_source.json`按已完成的源评测生成F−A/F−C。
+若C尚未评测完，对比先省略，C完成后再`--summarize_only`即可补齐。
+β=0不计算reference KL，训练KL汇总为null/未计算，不能理解成没有策略漂移；
+相对初始SFT的六候选子集KL仍正常测量。F只关闭KL惩罚，不修改奖励或SFT。
 
 所有 RL 方法默认设置 `eval_steps=0.1`，即大约每完成总训练步数的 10% 在
 validation split 上运行一次 RL validation（全程约 10 次）。这些结果用于观察

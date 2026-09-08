@@ -206,7 +206,7 @@ def ensure_evaluation(directory, sweep_dir, model, env, samples, arm=None, step=
     return result, probe
 
 
-def diagnostics(path):
+def diagnostics(path, beta=None):
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     rows = [r for r in rows if 'grad_norm' in r]
     if [r['step'] for r in rows] != list(range(1, STEPS[-1] + 1)):
@@ -215,8 +215,11 @@ def diagnostics(path):
     start = 0
     for end in STEPS:
         window = rows[start:end]
+        # TRL omits reference scoring/KL logging when beta=0. Missing KL is not zero drift.
         summary = dict(window_start=start+1, window_end=end,
-                       kl_mean=sum(r['kl'] for r in window)/len(window), kl_max=max(r['kl'] for r in window))
+                       training_kl_available=beta != 0,
+                       kl_mean=sum(r['kl'] for r in window)/len(window) if beta != 0 else None,
+                       kl_max=max(r['kl'] for r in window) if beta != 0 else None)
         for task in TASKS:
             prefix = f'prefix_aux/{task}/'
             count = sum(r.get(prefix+'groups', 0) for r in window)
@@ -241,7 +244,7 @@ def summarize(directory, state):
             continue
         if not any((result_dir(arm, step) / 'evaluation_complete.json').exists() for step in STEPS):
             continue
-        diag = diagnostics(run_dir(arm['run_tag']) / 'rl_diagnostics.jsonl')
+        diag = diagnostics(run_dir(arm['run_tag']) / 'rl_diagnostics.jsonl', beta=arm['beta'])
         for step in STEPS:
             dest = result_dir(arm, step)
             if not (dest / 'evaluation_complete.json').exists():
